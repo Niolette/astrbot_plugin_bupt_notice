@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass, asdict
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -309,7 +310,6 @@ async def _authenticate_cas(client: httpx.AsyncClient, cas_resp: httpx.Response)
             post_url = action
         elif action.startswith("/"):
             # 相对路径，拼接 WebVPN 代理的 base URL
-            from urllib.parse import urlparse
             parsed = urlparse(cas_login_url)
             base = f"{parsed.scheme}://{parsed.netloc}"
             # 对于 WebVPN 代理的路径，需要保留 /https/xxx 前缀
@@ -984,6 +984,5 @@ def _make_absolute_url(href: str, base_url: str) -> str:
     """将相对 URL 转为绝对 URL"""
     if href.startswith('http'):
         return href
-    from urllib.parse import urljoin
     # base_url 可能是 my.bupt.edu.cn 的页面
     return urljoin(base_url, href)

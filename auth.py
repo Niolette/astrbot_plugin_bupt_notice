@@ -404,20 +404,3 @@ async def check_session_valid(cookies: list[dict]) -> bool:
     except Exception as e:
         logger.debug(f"check_session_valid: 请求出错 {e}")
         return False
-
-    try:
-        async with httpx.AsyncClient(
-            cookies=cookie_dict,
-            follow_redirects=True,
-            verify=False,
-            timeout=15,
-        ) as client:
-            resp = await client.get(WEBVPN_BASE + "/")
-            logger.debug(f"check_session_valid: 状态码={resp.status_code}, URL={resp.url}")
-            # 如果返回登录页，说明 session 已过期
-            if "扫码登录" in resp.text or "do-login" in str(resp.url):
-                return False
-            return True
-    except Exception as e:
-        logger.debug(f"check_session_valid: 请求出错 {e}")
-        return False

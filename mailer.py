@@ -111,6 +111,11 @@ async def send_email(
     if not notices:
         return
 
+    if not smtp_user or not smtp_password:
+        raise ValueError("SMTP 发件配置不完整，请配置 smtp_user 和 smtp_password")
+    if not to_addr:
+        raise ValueError("收件邮箱地址未配置，请配置 email_to")
+
     # 使用 mixed 类型以支持附件
     msg = MIMEMultipart("mixed")
     msg["From"] = smtp_user

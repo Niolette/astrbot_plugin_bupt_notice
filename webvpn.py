@@ -117,7 +117,7 @@ def cookies_to_httpx(cookies: list[dict]) -> "httpx.Cookies":
     jar = _httpx.Cookies()
     for c in cookies:
         domain = c.get('domain', '')
-        if 'bupt.edu.cn' not in domain:
+        if domain and 'bupt.edu.cn' not in domain:
             continue
         # httpx 的 domain 不需要前导点
         domain = domain.lstrip('.')
