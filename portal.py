@@ -150,6 +150,45 @@ async def fetch_notices(
     return new_notices[:max_count]
 
 
+async def fetch_latest_notice() -> Notice | None:
+    """
+    获取最新的一条校内通知（不过滤已推送）
+
+    Returns:
+        最新通知，如果获取失败则返回 None
+    """
+    cookies_list = load_cookies()
+    if not cookies_list:
+        logger.warning("无保存的 cookies，请先登录")
+        return None
+
+    cookie_dict = cookies_to_httpx(cookies_list)
+
+    async with httpx.AsyncClient(
+        cookies=cookie_dict,
+        follow_redirects=True,
+        verify=False,
+        timeout=30,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        }
+    ) as client:
+        # 从通知公告获取
+        try:
+            notices = await _fetch_webapp_notices(
+                client,
+                NOTICE_SOURCES["webapp_tzgg"]["url"],
+                NOTICE_SOURCES["webapp_tzgg"]["name"],
+            )
+            if notices:
+                return notices[0]
+        except Exception as e:
+            logger.error(f"获取最新通知失败: {e}")
+
+    return None
+
+
 async def _fetch_webapp_notices(
     client: httpx.AsyncClient, url: str, source_name: str
 ) -> list[Notice]:

@@ -13,7 +13,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 
 from .auth import get_qrcode_and_wait, check_session_valid
-from .portal import fetch_notices, mark_seen, Notice, fetch_notice_detail
+from .portal import fetch_notices, fetch_latest_notice, mark_seen, Notice, fetch_notice_detail
 from .mailer import send_email, format_notices_text
 from .webvpn import load_cookies
 
@@ -173,6 +173,44 @@ class BuptNoticePlugin(Star):
         # 标记为已推送
         mark_seen(notices)
 
+    @bupt.command("latest", alias={"最新", "最新通知"})
+    async def cmd_latest(self, event: AstrMessageEvent):
+        """获取最新的一条校内通知"""
+        cookies = load_cookies()
+        if not cookies:
+            yield event.plain_result("❌ 未登录，请先使用 /bupt login 登录")
+            return
+
+        yield event.plain_result("🔍 正在获取最新通知...")
+
+        try:
+            notice = await fetch_latest_notice()
+        except Exception as e:
+            logger.error(f"获取最新通知失败: {e}")
+            yield event.plain_result(f"❌ 获取失败: {e}")
+            return
+
+        if not notice:
+            yield event.plain_result("📭 未获取到通知")
+            return
+
+        # 获取详情内容
+        content = await fetch_notice_detail(notice)
+
+        result = f"📢 最新校内通知\n"
+        result += f"━━━━━━━━━━━━━━━━━━━\n"
+        result += f"📄 {notice.title}\n"
+        if notice.date:
+            result += f"📅 {notice.date}\n"
+        if notice.source:
+            result += f"📂 {notice.source}\n"
+        if notice.author:
+            result += f"✍️ {notice.author}\n"
+        result += f"━━━━━━━━━━━━━━━━━━━\n"
+        result += content[:1500] if content else "（无法获取详情内容）"
+
+        yield event.plain_result(result)
+
     @bupt.command("subscribe", alias={"订阅"})
     async def cmd_subscribe(self, event: AstrMessageEvent):
         """订阅自动通知推送（当前会话）"""
@@ -236,6 +274,7 @@ class BuptNoticePlugin(Star):
             "/bupt login  - 扫码登录 WebVPN\n"
             "/bupt status - 查看登录和订阅状态\n"
             "/bupt check  - 手动查看新通知\n"
+            "/bupt latest - 获取最新一条校内通知\n"
             "/bupt detail <序号> - 查看通知详情\n"
             "/bupt subscribe - 订阅自动推送\n"
             "/bupt unsubscribe - 取消自动推送\n"
