@@ -23,6 +23,7 @@ LOGIN_DONE_PATTERNS = [
 
 async def _ensure_playwright():
     """确保 Playwright 浏览器已安装"""
+    import sys
     try:
         from playwright.async_api import async_playwright
         pw = await async_playwright().start()
@@ -30,13 +31,30 @@ async def _ensure_playwright():
         await browser.close()
         await pw.stop()
     except Exception:
-        logger.info("首次运行，正在安装 Playwright Chromium 浏览器...")
+        logger.info("首次运行，正在安装 Playwright Chromium 浏览器及系统依赖...")
+        # 先安装系统依赖（Linux 需要）
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "playwright", "install-deps", "chromium",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(f"安装系统依赖可能失败（非 root 或非 Debian/Ubuntu）: {stderr.decode()}")
+        except Exception as e:
+            logger.warning(f"安装系统依赖跳过: {e}")
+
+        # 安装浏览器
         proc = await asyncio.create_subprocess_exec(
-            "playwright", "install", "chromium",
+            sys.executable, "-m", "playwright", "install", "chromium",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error(f"安装 Chromium 失败: {stderr.decode()}")
+            raise RuntimeError(f"Playwright Chromium 安装失败: {stderr.decode()}")
         logger.info("Playwright Chromium 安装完成")
 
 
