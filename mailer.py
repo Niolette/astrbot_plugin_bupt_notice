@@ -7,6 +7,7 @@ import os
 import re
 import smtplib
 import tempfile
+from urllib.parse import unquote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -295,6 +296,7 @@ async def _download_attachments(
     results = []
     cookies_list = load_cookies()
     if not cookies_list:
+        logger.warning("附件下载: 无可用 cookies，跳过")
         return results
 
     cookie_dict = cookies_to_httpx(cookies_list)
@@ -304,6 +306,10 @@ async def _download_attachments(
         follow_redirects=True,
         verify=False,
         timeout=60,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        },
     ) as client:
         for att in attachments:
             name = att.get("name", "attachment")
@@ -314,13 +320,30 @@ async def _download_attachments(
             try:
                 # 已是 WebVPN URL 则直接使用，否则编码
                 vpn_url = url if url.startswith(WEBVPN_BASE) else encode_webvpn_url(url)
+                logger.info(f"附件下载中: {name} -> {vpn_url[:150]}")
                 resp = await client.get(vpn_url)
 
                 if resp.status_code != 200:
                     logger.warning(f"附件下载失败 ({name}): HTTP {resp.status_code}")
                     continue
 
+                # 检测是否被重定向到 CAS 登录页（返回 HTML 而非文件）
+                ct = resp.headers.get("content-type", "")
+                if "text/html" in ct:
+                    body_preview = resp.text[:300]
+                    if "cas" in body_preview.lower() or "login" in body_preview.lower():
+                        logger.warning(f"附件下载被重定向到登录页 ({name})，cookie 可能已过期")
+                        continue
+                    # download.jsp 可能返回 text/html 但实际是文件下载，检查 content-disposition
+                    cd = resp.headers.get("content-disposition", "")
+                    if not cd:
+                        logger.warning(f"附件下载返回 HTML 而非文件 ({name}): {ct}")
+                        continue
+
                 data = resp.content
+                if len(data) == 0:
+                    logger.warning(f"附件内容为空 ({name})，跳过")
+                    continue
                 if len(data) > max_size:
                     logger.warning(f"附件 {name} 过大 ({len(data)} bytes)，跳过")
                     continue
@@ -328,12 +351,13 @@ async def _download_attachments(
                 # 从响应头提取真实文件名
                 cd = resp.headers.get("content-disposition", "")
                 if "filename" in cd:
-                    import re
                     # filename*=UTF-8''xxx 或 filename="xxx"
                     match = re.search(r"filename\*?=['\"]?(?:UTF-8''|utf-8'')?([^'\";]+)", cd)
                     if match:
-                        from urllib.parse import unquote
                         name = unquote(match.group(1))
+
+                # 清理文件名：去除链接文本中的前缀如 "附件1 "
+                name = re.sub(r'^附件\s*\d*\s*', '', name).strip() or name
 
                 results.append((name, data))
                 logger.info(f"附件已下载: {name} ({len(data)} bytes)")
