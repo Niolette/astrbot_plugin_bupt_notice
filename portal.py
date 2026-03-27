@@ -208,7 +208,7 @@ async def _fetch_my_bupt_notices(
     logger.info(
         f"{source_name} 响应: status={resp.status_code}, "
         f"content-type={resp.headers.get('content-type', 'unknown')}, "
-        f"body_len={len(resp.text)}"
+        f"body_len={len(resp.text)}, final_url={resp.url}"
     )
 
     if resp.status_code != 200:
@@ -218,6 +218,21 @@ async def _fetch_my_bupt_notices(
         return []
 
     html = resp.text
+
+    # 检测 CAS 登录页拦截
+    if "<title>CAS Login" in html or "<title>CAS – Central Authentication" in html:
+        logger.warning(
+            f"{source_name} 被 CAS 拦截，返回了 CAS 登录页。"
+            f"请执行 /bupt login 重新扫码登录以获取 CAS 会话。"
+            f"响应 URL: {resp.url}"
+        )
+        # 输出当前 cookie 名称列表帮助诊断
+        cookie_names = sorted(set(
+            f"{c.name}(path={c.path})" for c in client.cookies.jar
+        ))
+        logger.info(f"{source_name} 当前 cookies: {cookie_names}")
+        return []
+
     logger.debug(f"{source_name} 响应前800字符: {html[:800]}")
 
     soup = BeautifulSoup(html, "lxml")

@@ -107,10 +107,24 @@ def load_cookies() -> list[dict] | None:
         return None
 
 
-def cookies_to_httpx(cookies: list[dict]) -> dict[str, str]:
-    """将 Playwright cookies 转换为 httpx 格式"""
-    result = {}
+def cookies_to_httpx(cookies: list[dict]) -> "httpx.Cookies":
+    """
+    将 Playwright cookies 转换为 httpx.Cookies，保留 domain 和 path 作用域。
+    这样同名 cookie（如 JSESSIONID）在不同 path 下可以共存且正确分发。
+    """
+    import httpx as _httpx
+
+    jar = _httpx.Cookies()
     for c in cookies:
-        if 'bupt.edu.cn' in c.get('domain', ''):
-            result[c['name']] = c['value']
-    return result
+        domain = c.get('domain', '')
+        if 'bupt.edu.cn' not in domain:
+            continue
+        # httpx 的 domain 不需要前导点
+        domain = domain.lstrip('.')
+        jar.set(
+            c['name'],
+            c['value'],
+            domain=domain,
+            path=c.get('path', '/'),
+        )
+    return jar
