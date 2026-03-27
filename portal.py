@@ -45,6 +45,7 @@ class Notice:
     url: str
     date: str = ""
     content: str = ""
+    content_html: str = ""  # 原始 HTML 内容（含 img 标签），用于邮件渲染
     author: str = ""
     attachments: list = None  # [{"name": str, "url": str}]
 
@@ -836,6 +837,34 @@ def _extract_block_text(element: Tag) -> str:
     return "\n".join(result_lines).strip()
 
 
+def _extract_content_html(element: Tag, base_url: str) -> str:
+    """
+    从 HTML 元素中提取清理后的 HTML 内容，将相对 URL 转为绝对 URL。
+    用于邮件渲染，保留图片和格式。
+    """
+    from copy import deepcopy
+
+    el = deepcopy(element)
+
+    # 移除 script 和 style 标签
+    for tag in el.find_all(['script', 'style']):
+        tag.decompose()
+
+    # img src 转绝对 URL
+    for img in el.find_all('img'):
+        src = img.get('src', '')
+        if src and not src.startswith(('http://', 'https://', 'data:')):
+            img['src'] = _make_absolute_url(src, base_url)
+
+    # a href 转绝对 URL
+    for a in el.find_all('a', href=True):
+        href = a['href']
+        if href and not href.startswith(('http://', 'https://', 'mailto:', '#', 'javascript:')):
+            a['href'] = _make_absolute_url(href, base_url)
+
+    return el.decode_contents()
+
+
 async def fetch_notice_detail(notice: Notice) -> str:
     """获取通知详情内容和附件。返回正文文本，同时填充 notice.attachments"""
     if not notice.url:
@@ -889,6 +918,8 @@ async def fetch_notice_detail(notice: Notice) -> str:
 
             # 提取正文内容
             content = ""
+            content_html = ""
+            content_el = None
             for selector in [
                 "#vsb_content", ".v_news_content", ".wp_articlecontent",
                 ".winstyle_articlecontent", "#articleContent",
@@ -899,12 +930,16 @@ async def fetch_notice_detail(notice: Notice) -> str:
                 content_el = soup.select_one(selector)
                 if content_el:
                     content = _extract_block_text(content_el)
+                    content_html = _extract_content_html(content_el, url)
                     break
 
             if not content:
                 body = soup.select_one("body")
                 if body:
                     content = _extract_block_text(body)[:2000]
+                    content_html = _extract_content_html(body, url)
+
+            notice.content_html = content_html
 
             # 提取附件链接
             attachments = _extract_attachments(soup, url)
