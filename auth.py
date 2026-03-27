@@ -178,66 +178,59 @@ async def _extract_qrcode(page, save_path: str) -> bool:
 
 
 async def _wait_for_login(page, context, timeout: int) -> list[dict] | None:
-    """等待登录完成，轮询检测"""
+    """等待登录完成，轮询检测 cookie 和页面变化"""
     poll_interval = 2  # 秒
     elapsed = 0
 
     initial_url = page.url
-    logger.info(f"开始等待扫码，初始 URL: {initial_url}，超时: {timeout}s")
+
+    # 记录登录前的 cookie 快照，用于对比变化
+    initial_cookies = await context.cookies()
+    initial_cookie_snapshot = {
+        (c['name'], c.get('value', '')) for c in initial_cookies
+    }
+    initial_cookie_names = {c['name'] for c in initial_cookies}
+    logger.info(
+        f"开始等待扫码，初始 URL: {initial_url}，"
+        f"初始 cookies ({len(initial_cookies)}): {sorted(initial_cookie_names)}，"
+        f"超时: {timeout}s"
+    )
 
     while elapsed < timeout:
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
+        # 检查1: URL 变化（最可靠的信号）
         try:
             current_url = page.url
         except Exception:
-            # 页面可能正在跳转
             await asyncio.sleep(1)
             continue
 
-        # 检查 URL 是否变化
         if current_url != initial_url:
-            logger.info(f"检测到 URL 变化: {current_url}")
-            await asyncio.sleep(3)  # 等待跳转和 cookie 设置完成
-            cookies = await context.cookies()
-            logger.info(f"获取到 {len(cookies)} 条 cookies")
-            if _has_vpn_ticket(cookies):
-                return cookies
-
-        # 检查是否已有 VPN ticket cookie（有些情况 URL 不变但 cookie 已设置）
-        try:
-            cookies = await context.cookies()
-            if _has_vpn_ticket(cookies):
-                logger.info(f"通过 cookie 检测到登录成功（URL 未变化），共 {len(cookies)} 条")
-                return cookies
-        except Exception:
-            pass
-
-        # 检查页面内容是否变化（二维码消失 = 正在处理登录）
-        try:
-            page_state = await page.evaluate("""() => {
-                const body = document.body ? document.body.innerText : '';
-                const hasQR = !!document.querySelector('img[src^="data:image"]');
-                const hasLogin = body.includes('扫码登录');
-                return { hasQR, hasLogin, url: window.location.href, bodyLen: body.length };
-            }""")
-            if not page_state.get('hasQR') and not page_state.get('hasLogin'):
-                logger.info(f"页面内容已变化（二维码/登录框消失），当前: {page_state}")
+            logger.info(f"检测到 URL 变化: {initial_url} -> {current_url}")
+            # URL 变了但可能只是 iframe 跳转，检查是否离开了登录页
+            if "do-login" not in current_url and "/login" not in current_url:
                 await asyncio.sleep(3)
                 cookies = await context.cookies()
-                if cookies:
+                if _cookies_changed(initial_cookie_snapshot, cookies):
+                    logger.info(f"URL 变化 + cookie 变化，登录成功！新 cookies: {len(cookies)}")
                     return cookies
+
+        # 检查2: cookie 是否发生了变化（新增或值改变）
+        try:
+            current_cookies = await context.cookies()
+            if _cookies_changed(initial_cookie_snapshot, current_cookies):
+                logger.info(f"检测到 cookie 变化，登录成功！共 {len(current_cookies)} 条")
+                new_names = {c['name'] for c in current_cookies} - initial_cookie_names
+                changed = {
+                    c['name'] for c in current_cookies
+                    if (c['name'], c.get('value', '')) not in initial_cookie_snapshot
+                }
+                logger.info(f"新增 cookie: {new_names}, 变化的 cookie: {changed}")
+                return current_cookies
         except Exception:
-            # 页面可能在跳转中，也是好信号
-            logger.info("页面正在跳转中...")
-            await asyncio.sleep(3)
-            try:
-                cookies = await context.cookies()
-                if cookies:
-                    return cookies
-            except Exception:
-                pass
+            pass
 
         if elapsed % 10 == 0:
             logger.debug(f"等待扫码中... ({elapsed}/{timeout}s)")
@@ -246,21 +239,39 @@ async def _wait_for_login(page, context, timeout: int) -> list[dict] | None:
     return None
 
 
-def _has_vpn_ticket(cookies: list[dict]) -> bool:
-    """检查 cookies 中是否包含 WebVPN 认证 ticket"""
-    for c in cookies:
-        name = c.get('name', '').lower()
-        # WebVPN 登录成功后会设置 wengine_vpn_ticket 相关 cookie
-        if 'wengine_vpn_ticket' in name or 'vpn_ticket' in name:
-            return True
-        # 也可能是其他 session cookie
-        if 'webvpn' in name and 'token' in name:
-            return True
+def _cookies_changed(initial_snapshot: set[tuple[str, str]], current_cookies: list[dict]) -> bool:
+    """
+    检测 cookies 是否相对初始快照发生了有意义的变化。
+    只要有 cookie 的值变了或新增了包含 ticket/token 的 cookie，就认为登录成功。
+    """
+    current_snapshot = {
+        (c['name'], c.get('value', '')) for c in current_cookies
+    }
+
+    # 新增或值变化的 cookie
+    diff = current_snapshot - initial_snapshot
+    if not diff:
+        return False
+
+    changed_names = {name for name, _ in diff}
+
+    # 关键 cookie 变化 = 登录成功
+    key_patterns = ['ticket', 'token', 'session', 'JSESSIONID', 'uid']
+    for name in changed_names:
+        name_lower = name.lower()
+        for pattern in key_patterns:
+            if pattern.lower() in name_lower:
+                return True
+
+    # 如果有 3 个以上 cookie 变化，也认为状态改变了
+    if len(diff) >= 3:
+        return True
+
     return False
 
 
 async def check_session_valid(cookies: list[dict]) -> bool:
-    """检查已保存的 cookies 是否仍然有效"""
+    """检查已保存的 cookies 是否仍然有效（通过实际请求验证）"""
     import httpx
 
     cookie_dict = {}
@@ -273,9 +284,37 @@ async def check_session_valid(cookies: list[dict]) -> bool:
         logger.debug("check_session_valid: 无有效 cookies")
         return False
 
-    # 先检查是否有 VPN ticket
-    if not _has_vpn_ticket(cookies):
-        logger.debug("check_session_valid: 无 VPN ticket cookie")
+    try:
+        async with httpx.AsyncClient(
+            cookies=cookie_dict,
+            follow_redirects=False,  # 不跟随重定向，方便判断
+            verify=False,
+            timeout=15,
+        ) as client:
+            resp = await client.get(WEBVPN_BASE + "/")
+            logger.debug(f"check_session_valid: 状态码={resp.status_code}, URL={resp.url}")
+
+            # 200 且不含登录页内容 = 有效
+            if resp.status_code == 200:
+                text = resp.text
+                if "扫码登录" in text or "do-login" in text or "请使用" in text:
+                    logger.debug("check_session_valid: 返回了登录页，session 无效")
+                    return False
+                logger.debug("check_session_valid: session 有效")
+                return True
+
+            # 302 跳转到登录页 = 过期
+            if resp.status_code in (301, 302, 303, 307):
+                location = resp.headers.get("location", "")
+                logger.debug(f"check_session_valid: 重定向到 {location}")
+                if "login" in location.lower() or "do-login" in location:
+                    return False
+                # 重定向到非登录页也算有效
+                return True
+
+            return False
+    except Exception as e:
+        logger.debug(f"check_session_valid: 请求出错 {e}")
         return False
 
     try:
