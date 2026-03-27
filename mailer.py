@@ -61,10 +61,6 @@ def format_notices_html(notices: list[Notice]) -> str:
     return f"""
     <html>
     <body style="font-family: -apple-system, 'Segoe UI', sans-serif; max-width:700px; margin:0 auto; padding:20px;">
-        <h2 style="color:#1890ff; border-bottom:2px solid #1890ff; padding-bottom:8px;">
-            📢 北邮通知更新
-        </h2>
-        <p style="color:#888;">共 {len(notices)} 条新通知</p>
         {items_html}
         <p style="color:#aaa;font-size:12px;margin-top:20px;text-align:center;">
             —— 由 AstrBot 北邮通知推送插件自动发送 ——
@@ -76,7 +72,7 @@ def format_notices_html(notices: list[Notice]) -> str:
 
 def format_notices_text(notices: list[Notice]) -> str:
     """将通知列表格式化为纯文本（含详情内容）"""
-    lines = [f"📢 北邮通知更新 (共 {len(notices)} 条)\n"]
+    lines = []
     for i, n in enumerate(notices, 1):
         date_part = f" ({n.date})" if n.date else ""
         lines.append(f"━━━━━━━━━━━━━━━━━━━")
