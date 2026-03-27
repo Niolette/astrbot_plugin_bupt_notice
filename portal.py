@@ -980,18 +980,29 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
 
     # 调试：列出页面中的所有 <a> 链接
     all_links = soup.find_all('a', href=True)
-    logger.debug(f"附件提取: 页面共 {len(all_links)} 个 <a> 链接")
-    for a in all_links[:30]:  # 只记录前30个
+    logger.info(f"附件提取: 页面共 {len(all_links)} 个 <a> 链接")
+    for a in all_links[:20]:
         href = a.get('href', '')
-        text = a.get_text(strip=True)[:50]
-        logger.debug(f"  链接: text='{text}', href='{href[:120]}'")
+        text = a.get_text(strip=True)[:60]
+        logger.info(f"  链接: text='{text}', href='{href[:150]}'")
 
     # 调试：检查是否存在附件相关的容器
     for sel in ['#vsb_content_2', '.fujian', '.attachment', '[class*="attach"]',
-                '[class*="file"]', '.cl_att', '[class*="down"]', '.box_content']:
+                '[class*="file"]', '.cl_att', '[class*="down"]', '.box_content',
+                '#vsb_content']:
         el = soup.select_one(sel)
         if el:
-            logger.info(f"附件提取: 找到容器 '{sel}'，内含 {len(el.find_all('a'))} 个链接")
+            inner_links = el.find_all('a')
+            logger.info(f"附件提取: 找到容器 '{sel}'，内含 {len(inner_links)} 个链接")
+            # 打印容器内链接详情
+            for a in inner_links[:10]:
+                href = a.get('href', '')
+                text = a.get_text(strip=True)[:60]
+                logger.info(f"  容器内链接: text='{text}', href='{href[:150]}'")
+            # 如果容器内没有链接，打印容器 HTML 前 500 字符
+            if not inner_links:
+                html_snippet = str(el)[:500]
+                logger.info(f"  容器HTML片段: {html_snippet}")
 
     # 策略1: 查找显式标记的附件区域
     for selector in [
