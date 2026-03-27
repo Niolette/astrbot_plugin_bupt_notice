@@ -27,6 +27,7 @@ AstrBot 插件 —— 自动爬取北京邮电大学信息门户通知，通过 
 | `/bupt login` | `/bupt 登录` | 扫码登录 WebVPN |
 | `/bupt status` | `/bupt 状态` | 查看登录和订阅状态 |
 | `/bupt check` | `/bupt 查看` `/bupt 通知` | 手动查看新通知 |
+| `/bupt latest` | `/bupt 最新` `/bupt 最新通知` | 获取最新一条校内通知及详情 |
 | `/bupt detail <序号>` | `/bupt 详情` | 查看通知详情 |
 | `/bupt subscribe` | `/bupt 订阅` | 订阅自动推送 |
 | `/bupt unsubscribe` | `/bupt 取消订阅` | 取消自动推送 |
