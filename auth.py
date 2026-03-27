@@ -196,11 +196,12 @@ async def _wait_for_login(page, context, timeout: int) -> list[dict] | None:
         f"超时: {timeout}s"
     )
 
+    wechat_code_detected = False
+
     while elapsed < timeout:
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
 
-        # 检查1: URL 变化（最可靠的信号）
         try:
             current_url = page.url
         except Exception:
@@ -208,16 +209,58 @@ async def _wait_for_login(page, context, timeout: int) -> list[dict] | None:
             continue
 
         if current_url != initial_url:
-            logger.info(f"检测到 URL 变化: {initial_url} -> {current_url}")
-            # URL 变了但可能只是 iframe 跳转，检查是否离开了登录页
-            if "do-login" not in current_url and "/login" not in current_url:
+            # 检测到微信扫码回调（URL 带 wechat_login=true&code=）
+            if "wechat_login=true" in current_url and "code=" in current_url:
+                if not wechat_code_detected:
+                    wechat_code_detected = True
+                    logger.info(f"检测到微信扫码回调: {current_url}")
+                    logger.info("等待服务器处理微信认证...")
+
+                    # 等待页面完成加载（服务器处理微信 code 后会跳转）
+                    try:
+                        await page.wait_for_url(
+                            lambda url: "/login" not in url,
+                            timeout=30000,
+                        )
+                        logger.info(f"微信认证完成，最终 URL: {page.url}")
+                        await asyncio.sleep(2)
+                        cookies = await context.cookies()
+                        logger.info(f"获取到 {len(cookies)} 条 cookies")
+                        return cookies
+                    except Exception as e:
+                        logger.info(f"wait_for_url 超时或异常: {e}，改为轮询检测...")
+
+                # wait_for_url 失败后继续轮询，检查 cookie 变化
+                try:
+                    current_cookies = await context.cookies()
+                    if _cookies_changed(initial_cookie_snapshot, current_cookies):
+                        logger.info(f"微信认证后检测到 cookie 变化，登录成功！")
+                        return current_cookies
+                except Exception:
+                    pass
+
+                # 再检查一下 URL 是否已离开 /login
+                try:
+                    final_url = page.url
+                    if "/login" not in final_url:
+                        logger.info(f"页面已跳转到: {final_url}")
+                        await asyncio.sleep(2)
+                        cookies = await context.cookies()
+                        return cookies
+                except Exception:
+                    pass
+
+                continue
+
+            # 非微信回调的 URL 变化，直接跳转到了已认证页面
+            if "/login" not in current_url:
+                logger.info(f"页面跳转到非登录页: {current_url}")
                 await asyncio.sleep(3)
                 cookies = await context.cookies()
-                if _cookies_changed(initial_cookie_snapshot, cookies):
-                    logger.info(f"URL 变化 + cookie 变化，登录成功！新 cookies: {len(cookies)}")
-                    return cookies
+                logger.info(f"获取到 {len(cookies)} 条 cookies")
+                return cookies
 
-        # 检查2: cookie 是否发生了变化（新增或值改变）
+        # 检查 cookie 变化（无论 URL 是否变化）
         try:
             current_cookies = await context.cookies()
             if _cookies_changed(initial_cookie_snapshot, current_cookies):
