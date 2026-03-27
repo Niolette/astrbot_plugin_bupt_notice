@@ -963,29 +963,43 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
     attachments = []
     seen_urls = set()
 
-    # 常见附件扩展名
-    file_exts = (
+    # 常见附件扩展名（非图片，图片已作为内联图片处理）
+    doc_exts = (
         '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
         '.zip', '.rar', '.7z', '.tar', '.gz',
-        '.jpg', '.jpeg', '.png', '.gif', '.bmp',
         '.txt', '.csv', '.rtf', '.wps', '.odt',
     )
+    # 图片扩展名单独处理（仅在显式附件区域时才收集图片附件）
+    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp')
+    all_file_exts = doc_exts + image_exts
 
-    def _href_has_file_ext(href: str) -> bool:
+    def _href_has_file_ext(href: str, exts=doc_exts) -> bool:
         """检查链接是否指向文件，忽略查询字符串（如 ?vpn-1）"""
-        # 去掉查询字符串和锚点再判断扩展名
         path = href.split('?')[0].split('#')[0].lower()
-        return any(path.endswith(ext) for ext in file_exts)
+        return any(path.endswith(ext) for ext in exts)
+
+    # 调试：列出页面中的所有 <a> 链接
+    all_links = soup.find_all('a', href=True)
+    logger.debug(f"附件提取: 页面共 {len(all_links)} 个 <a> 链接")
+    for a in all_links[:30]:  # 只记录前30个
+        href = a.get('href', '')
+        text = a.get_text(strip=True)[:50]
+        logger.debug(f"  链接: text='{text}', href='{href[:120]}'")
+
+    # 调试：检查是否存在附件相关的容器
+    for sel in ['#vsb_content_2', '.fujian', '.attachment', '[class*="attach"]',
+                '[class*="file"]', '.cl_att', '[class*="down"]', '.box_content']:
+        el = soup.select_one(sel)
+        if el:
+            logger.info(f"附件提取: 找到容器 '{sel}'，内含 {len(el.find_all('a'))} 个链接")
 
     # 策略1: 查找显式标记的附件区域
     for selector in [
         '.fujian a', '.attachment a', '.accessory a',
         '[class*="attach"] a', '[class*="file"] a',
         '#vsb_content_2 a', '.box_content a',
-        '.cl_att a',  # 北邮 CMS 常见附件区域
-        '#vsb_content a[href*="__local"]',  # 正文内嵌的文件链接
-        '.wp_articlecontent a[href*="__local"]',
-        '[class*="down"] a',  # 下载区域
+        '.cl_att a',
+        '[class*="down"] a',
     ]:
         for a in soup.select(selector):
             href = a.get('href', '')
@@ -997,12 +1011,37 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
                     'url': _make_absolute_url(href, base_url),
                 })
 
-    # 策略2: 查找指向文件的链接（忽略查询字符串）
+    # 策略2: 在正文区域查找文档文件链接
+    content_selectors = [
+        '#vsb_content', '.v_news_content', '.wp_articlecontent',
+        '.winstyle_articlecontent', '#articleContent',
+        '.content', '.article-content', '.detail-content',
+    ]
+    for sel in content_selectors:
+        content_el = soup.select_one(sel)
+        if not content_el:
+            continue
+        for a in content_el.find_all('a', href=True):
+            href = a.get('href', '')
+            if href in seen_urls:
+                continue
+            # 文档扩展名匹配（不含图片）
+            if _href_has_file_ext(href, doc_exts):
+                name = a.get_text(strip=True) or href.split('?')[0].split('/')[-1]
+                if name:
+                    seen_urls.add(href)
+                    attachments.append({
+                        'name': name,
+                        'url': _make_absolute_url(href, base_url),
+                    })
+        break  # 只处理第一个匹配的正文容器
+
+    # 策略3: 全局查找指向文档文件的链接
     for a in soup.find_all('a', href=True):
         original_href = a.get('href', '')
         if original_href in seen_urls:
             continue
-        if _href_has_file_ext(original_href):
+        if _href_has_file_ext(original_href, doc_exts):
             name = a.get_text(strip=True) or original_href.split('?')[0].split('/')[-1]
             if name:
                 seen_urls.add(original_href)
@@ -1011,16 +1050,20 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
                     'url': _make_absolute_url(original_href, base_url),
                 })
 
-    # 策略3: 查找包含上传/附件/本地文件路径关键词的 URL
+    # 策略4: 查找包含上传/附件/本地文件路径关键词的 URL（排除图片）
     for a in soup.find_all('a', href=True):
         href = a.get('href', '')
         if href in seen_urls:
             continue
-        if any(kw in href.lower() for kw in [
+        href_lower = href.lower()
+        if any(kw in href_lower for kw in [
             '_upload/', '/attachment/', '/upload/', '/file/',
-            '__local/',  # 北邮 CMS 上传文件路径
-            '/system/resource/',  # 北邮门户资源路径
+            '__local/',
+            '/system/resource/',
         ]):
+            # 排除图片链接（已作为内联图片处理）
+            if _href_has_file_ext(href, image_exts):
+                continue
             name = a.get_text(strip=True) or href.split('?')[0].split('/')[-1]
             if name and len(name) > 2:
                 seen_urls.add(href)
@@ -1028,6 +1071,21 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
                     'name': name,
                     'url': _make_absolute_url(href, base_url),
                 })
+
+    # 策略5: 查找带有 download 属性的链接
+    for a in soup.find_all('a', attrs={'download': True}):
+        href = a.get('href', '')
+        if href and href not in seen_urls:
+            name = a.get('download') or a.get_text(strip=True) or href.split('?')[0].split('/')[-1]
+            seen_urls.add(href)
+            attachments.append({
+                'name': name,
+                'url': _make_absolute_url(href, base_url),
+            })
+
+    logger.info(f"附件提取结果: {len(attachments)} 个附件")
+    for att in attachments:
+        logger.info(f"  附件: {att['name']} -> {att['url'][:100]}")
 
     return attachments
 
