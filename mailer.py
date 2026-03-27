@@ -18,7 +18,7 @@ import httpx
 from astrbot.api import logger
 
 from .portal import Notice
-from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies
+from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies, WEBVPN_BASE
 
 
 def format_notices_html(notices: list[Notice]) -> str:
@@ -248,8 +248,9 @@ async def _process_inline_images(
     ) as client:
         for url, cid in img_map.items():
             try:
-                vpn_url = encode_webvpn_url(url)
-                resp = await client.get(vpn_url)
+                # 已是 WebVPN URL 则直接使用，否则编码
+                dl_url = url if url.startswith(WEBVPN_BASE) else encode_webvpn_url(url)
+                resp = await client.get(dl_url)
 
                 if resp.status_code != 200:
                     logger.warning(f"内联图片下载失败 ({url}): HTTP {resp.status_code}")
@@ -311,7 +312,8 @@ async def _download_attachments(
                 continue
 
             try:
-                vpn_url = encode_webvpn_url(url)
+                # 已是 WebVPN URL 则直接使用，否则编码
+                vpn_url = url if url.startswith(WEBVPN_BASE) else encode_webvpn_url(url)
                 resp = await client.get(vpn_url)
 
                 if resp.status_code != 200:

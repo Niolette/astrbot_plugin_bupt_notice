@@ -916,6 +916,9 @@ async def fetch_notice_detail(notice: Notice) -> str:
 
             soup = BeautifulSoup(html, "lxml")
 
+            # 用实际响应 URL（WebVPN URL）作为基址，正确解析相对路径
+            actual_base_url = str(resp.url)
+
             # 提取正文内容
             content = ""
             content_html = ""
@@ -930,19 +933,19 @@ async def fetch_notice_detail(notice: Notice) -> str:
                 content_el = soup.select_one(selector)
                 if content_el:
                     content = _extract_block_text(content_el)
-                    content_html = _extract_content_html(content_el, url)
+                    content_html = _extract_content_html(content_el, actual_base_url)
                     break
 
             if not content:
                 body = soup.select_one("body")
                 if body:
                     content = _extract_block_text(body)[:2000]
-                    content_html = _extract_content_html(body, url)
+                    content_html = _extract_content_html(body, actual_base_url)
 
             notice.content_html = content_html
 
             # 提取附件链接
-            attachments = _extract_attachments(soup, url)
+            attachments = _extract_attachments(soup, actual_base_url)
             notice.attachments = attachments
             if attachments:
                 logger.info(f"通知 '{notice.title}' 发现 {len(attachments)} 个附件")
