@@ -10,7 +10,7 @@ import tempfile
 
 from astrbot.api import logger
 
-from .webvpn import WEBVPN_BASE, save_cookies
+from .webvpn import WEBVPN_BASE, save_cookies, encode_webvpn_url
 
 LOGIN_URL = WEBVPN_BASE + "/"
 # 登录成功后页面 URL 不再包含 login 或者会跳转到 portal
@@ -108,6 +108,8 @@ async def get_qrcode_and_wait(timeout: int = 120) -> tuple[str | None, list[dict
         cookies = await _wait_for_login(page, context, timeout)
 
         if cookies:
+            # 登录成功后，访问内部页面以完成 CAS SSO 认证
+            cookies = await _warmup_cas_sso(page, context, cookies)
             save_cookies(cookies)
             logger.info(f"登录成功，已保存 {len(cookies)} 条 cookies")
             return qr_image_path, cookies
@@ -124,6 +126,49 @@ async def get_qrcode_and_wait(timeout: int = 120) -> tuple[str | None, list[dict
         if browser:
             await browser.close()
         await pw.stop()
+
+
+# 需要在 Playwright 登录后访问以完成 CAS SSO 的内部页面
+_CAS_WARMUP_URLS = [
+    "http://my.bupt.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1154",
+]
+
+
+async def _warmup_cas_sso(page, context, cookies: list[dict]) -> list[dict]:
+    """
+    WebVPN 登录成功后，访问内部页面以触发 CAS SSO 认证流程。
+    浏览器会自动处理 CAS 重定向链，最终 CAS session 的 cookies 会被写入 context。
+    """
+    for url in _CAS_WARMUP_URLS:
+        vpn_url = encode_webvpn_url(url)
+        logger.info(f"正在预热 CAS SSO: {vpn_url}")
+        try:
+            await page.goto(vpn_url, wait_until="networkidle", timeout=30000)
+            final_url = page.url
+            title = await page.title()
+            logger.info(f"CAS 预热完成: title={title}, url={final_url}")
+
+            # 如果仍然停在 CAS 登录页，可能需要处理
+            if "CAS Login" in (title or "") or "login" in (final_url or "").lower():
+                logger.warning(
+                    f"CAS 预热后仍在登录页 (title={title})，"
+                    "可能 CAS SSO 与 WebVPN 未打通，尝试查找自动提交表单..."
+                )
+                # 有些 CAS 页面内嵌了自动提交的 SSO 表单
+                await asyncio.sleep(3)
+                final_title = await page.title()
+                if "CAS Login" not in (final_title or ""):
+                    logger.info(f"CAS 延迟跳转成功: title={final_title}")
+        except Exception as e:
+            logger.warning(f"CAS SSO 预热失败 ({url}): {e}")
+
+    # 重新获取包含 CAS session 的完整 cookies
+    updated_cookies = await context.cookies()
+    logger.info(
+        f"CAS 预热后 cookies: {len(updated_cookies)} 条 "
+        f"(原 {len(cookies)} 条)"
+    )
+    return updated_cookies
 
 
 async def _extract_qrcode(page, save_path: str) -> bool:
