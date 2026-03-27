@@ -25,39 +25,39 @@ def format_notices_html(notices: list[Notice]) -> str:
     """将通知列表格式化为 HTML 邮件内容（含详情）"""
     items_html = ""
     for i, n in enumerate(notices, 1):
-        date_part = f'<span style="color:#888;font-size:12px;">{n.date}</span>' if n.date else ""
-        source_part = f'<span style="color:#1890ff;font-size:12px;">[{n.source}]</span>'
-        author_part = f'<span style="color:#52c41a;font-size:12px;">✍️ {n.author}</span>' if n.author else ""
+        date_part = f'<span style="color:#999;font-size:13px;">{n.date}</span>' if n.date else ""
+        source_part = f'<span style="color:#1890ff;font-size:13px;font-weight:500;">[{n.source}]</span>'
+        author_part = f'<span style="color:#52c41a;font-size:13px;">✍️ {n.author}</span>' if n.author else ""
 
         content_html = ""
         if n.content_html:
             # 使用原始 HTML 内容（保留图片和格式，img src 已在发送时替换为 cid）
-            content_html = f'<div style="color:#444;font-size:14px;margin:8px 0;line-height:1.6;">{n.content_html}</div>'
+            content_html = f'<div style="color:#333;font-size:15px;margin:10px 0;line-height:1.8;">{n.content_html}</div>'
         elif n.content:
             # 回退：纯文本转 HTML
             escaped = n.content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             escaped = escaped.replace("\n", "<br>")
-            content_html = f'<div style="color:#444;font-size:14px;margin:8px 0;line-height:1.6;">{escaped}</div>'
+            content_html = f'<div style="color:#333;font-size:15px;margin:10px 0;line-height:1.8;">{escaped}</div>'
         else:
-            content_html = '<p style="color:#999;font-size:13px;">（未获取到详情内容）</p>'
+            content_html = '<p style="color:#999;font-size:14px;">（未获取到详情内容）</p>'
 
         # 附件列表
         attach_html = ""
         if n.attachments:
             attach_items = ""
             for att in n.attachments:
-                attach_items += f'<li style="margin:4px 0;"><a href="{att["url"]}" style="color:#1890ff;">{att["name"]}</a></li>'
+                attach_items += f'<li style="margin:5px 0;"><a href="{att["url"]}" style="color:#1890ff;text-decoration:none;">{att["name"]}</a></li>'
             attach_html = f"""
-            <div style="margin:8px 0;padding:8px;background:#f6f8fa;border-radius:4px;">
-                <strong style="font-size:13px;">📎 附件 ({len(n.attachments)} 个):</strong>
-                <ul style="margin:4px 0;padding-left:20px;">{attach_items}</ul>
+            <div style="margin:12px 0;padding:10px 14px;background:#f6f8fa;border-radius:6px;border-left:3px solid #1890ff;">
+                <strong style="font-size:14px;color:#333;">📎 附件 ({len(n.attachments)} 个):</strong>
+                <ul style="margin:6px 0 0;padding-left:20px;">{attach_items}</ul>
             </div>
             """
 
         items_html += f"""
-        <div style="padding:16px 0;border-bottom:2px solid #eee;">
-            <div style="margin-bottom:4px;">{source_part} {author_part} {date_part}</div>
-            <h3 style="font-size:16px;margin:4px 0;color:#333;">{i}. {n.title}</h3>
+        <div style="padding:16px 0;border-bottom:1px solid #eee;">
+            <div style="margin-bottom:6px;">{source_part} {author_part} {date_part}</div>
+            <h3 style="font-size:17px;margin:6px 0 10px;color:#1a1a1a;font-weight:600;">{i}. {n.title}</h3>
             {content_html}
             {attach_html}
         </div>
@@ -65,9 +65,9 @@ def format_notices_html(notices: list[Notice]) -> str:
 
     return f"""
     <html>
-    <body style="font-family: -apple-system, 'Segoe UI', sans-serif; max-width:700px; margin:0 auto; padding:20px;">
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif; max-width:700px; margin:0 auto; padding:20px; color:#333; font-size:15px; line-height:1.7;">
         {items_html}
-        <p style="color:#aaa;font-size:12px;margin-top:20px;text-align:center;">
+        <p style="color:#bbb;font-size:12px;margin-top:24px;text-align:center;border-top:1px solid #eee;padding-top:12px;">
             —— 由 AstrBot 北邮通知推送插件自动发送 ——
         </p>
     </body>

@@ -971,12 +971,21 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
         '.txt', '.csv', '.rtf', '.wps', '.odt',
     )
 
+    def _href_has_file_ext(href: str) -> bool:
+        """检查链接是否指向文件，忽略查询字符串（如 ?vpn-1）"""
+        # 去掉查询字符串和锚点再判断扩展名
+        path = href.split('?')[0].split('#')[0].lower()
+        return any(path.endswith(ext) for ext in file_exts)
+
     # 策略1: 查找显式标记的附件区域
     for selector in [
         '.fujian a', '.attachment a', '.accessory a',
         '[class*="attach"] a', '[class*="file"] a',
         '#vsb_content_2 a', '.box_content a',
         '.cl_att a',  # 北邮 CMS 常见附件区域
+        '#vsb_content a[href*="__local"]',  # 正文内嵌的文件链接
+        '.wp_articlecontent a[href*="__local"]',
+        '[class*="down"] a',  # 下载区域
     ]:
         for a in soup.select(selector):
             href = a.get('href', '')
@@ -988,26 +997,31 @@ def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
                     'url': _make_absolute_url(href, base_url),
                 })
 
-    # 策略2: 查找指向文件的链接
+    # 策略2: 查找指向文件的链接（忽略查询字符串）
     for a in soup.find_all('a', href=True):
-        href = a.get('href', '').lower()
-        if any(href.endswith(ext) for ext in file_exts):
-            original_href = a.get('href', '')
-            name = a.get_text(strip=True) or original_href.split('/')[-1]
-            if original_href not in seen_urls:
+        original_href = a.get('href', '')
+        if original_href in seen_urls:
+            continue
+        if _href_has_file_ext(original_href):
+            name = a.get_text(strip=True) or original_href.split('?')[0].split('/')[-1]
+            if name:
                 seen_urls.add(original_href)
                 attachments.append({
                     'name': name,
                     'url': _make_absolute_url(original_href, base_url),
                 })
 
-    # 策略3: 查找包含 "_upload" 或 "attachment" 的 URL
+    # 策略3: 查找包含上传/附件/本地文件路径关键词的 URL
     for a in soup.find_all('a', href=True):
         href = a.get('href', '')
         if href in seen_urls:
             continue
-        if any(kw in href.lower() for kw in ['_upload/', '/attachment/', '/upload/', '/file/']):
-            name = a.get_text(strip=True) or href.split('/')[-1]
+        if any(kw in href.lower() for kw in [
+            '_upload/', '/attachment/', '/upload/', '/file/',
+            '__local/',  # 北邮 CMS 上传文件路径
+            '/system/resource/',  # 北邮门户资源路径
+        ]):
+            name = a.get_text(strip=True) or href.split('?')[0].split('/')[-1]
             if name and len(name) > 2:
                 seen_urls.add(href)
                 attachments.append({
