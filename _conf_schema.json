@@ -62,5 +62,11 @@
     "description": "每次最多推送的通知条数",
     "type": "int",
     "default": 10
+  },
+  "admin_umo": {
+    "description": "管理员 QQ 统一消息来源（登录失效时自动发二维码给此用户）",
+    "type": "string",
+    "default": "",
+    "hint": "发送 /bupt login 时日志中会显示 unified_msg_origin，填入即可。留空则仅发消息提醒重新登录"
   }
 }

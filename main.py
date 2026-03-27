@@ -90,6 +90,12 @@ class BuptNoticePlugin(Star):
 
     async def _do_login(self, event: AstrMessageEvent, timeout: int):
         """执行登录流程：获取二维码 → 发送 → 等待扫码"""
+        target_umo = event.unified_msg_origin
+        logger.info(f"登录请求来源 UMO: {target_umo}")
+        return await self._do_login_to(target_umo, timeout)
+
+    async def _do_login_to(self, target_umo: str, timeout: int):
+        """执行登录流程，将二维码发送到指定 UMO"""
         from .auth import get_qrcode_and_wait as _login
 
         # 删除旧二维码文件
@@ -113,7 +119,7 @@ class BuptNoticePlugin(Star):
                     chain = MessageChain() \
                         .message("📱 请使用微信/企业微信扫描以下二维码登录 WebVPN：") \
                         .file_image(qr_path)
-                    await self.context.send_message(event.unified_msg_origin, chain)
+                    await self.context.send_message(target_umo, chain)
                     qr_sent = True
                     break
 
@@ -325,11 +331,36 @@ class BuptNoticePlugin(Star):
 
                 valid = await check_session_valid(cookies)
                 if not valid:
-                    logger.warning("WebVPN 会话已过期，暂停自动检查")
-                    chain = MessageChain().message(
-                        "⚠️ WebVPN 会话已过期，请使用 /bupt login 重新登录"
-                    )
-                    await self.context.send_message(self._subscriber_umo, chain)
+                    logger.warning("WebVPN 会话已过期，尝试自动重新登录")
+
+                    admin_umo = self.config.get("admin_umo", "")
+                    if admin_umo and not self._login_lock.locked():
+                        # 自动触发登录，发二维码给管理员
+                        async with self._login_lock:
+                            chain = MessageChain().message(
+                                "⚠️ WebVPN 会话已过期，正在自动获取登录二维码..."
+                            )
+                            await self.context.send_message(admin_umo, chain)
+
+                            timeout = self.config.get("login_timeout", 120)
+                            qr_path, new_cookies = await self._do_login_to(admin_umo, timeout)
+
+                            if new_cookies:
+                                chain = MessageChain().message("✅ 自动重新登录成功！")
+                                await self.context.send_message(admin_umo, chain)
+                            elif qr_path:
+                                chain = MessageChain().message("❌ 扫码超时，请手动 /bupt login")
+                                await self.context.send_message(admin_umo, chain)
+                            else:
+                                chain = MessageChain().message("❌ 获取二维码失败，请手动 /bupt login")
+                                await self.context.send_message(admin_umo, chain)
+                    else:
+                        # 无管理员配置或正在登录中，仅发提醒
+                        if self._subscriber_umo:
+                            chain = MessageChain().message(
+                                "⚠️ WebVPN 会话已过期，请使用 /bupt login 重新登录"
+                            )
+                            await self.context.send_message(self._subscriber_umo, chain)
                     continue
 
                 # 获取新通知
