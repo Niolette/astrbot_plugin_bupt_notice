@@ -10,7 +10,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from astrbot.api import logger
 
@@ -797,6 +797,45 @@ def _parse_notice_page(soup: BeautifulSoup, source_name: str, base_url: str) -> 
     return notices
 
 
+# 块级标签集合，遇到这些标签时插入换行
+_BLOCK_TAGS = frozenset([
+    "p", "div", "br", "hr", "li", "tr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "pre", "section", "article",
+    "table", "thead", "tbody", "tfoot",
+    "ul", "ol", "dl", "dt", "dd", "figcaption",
+])
+
+
+def _extract_block_text(element: Tag) -> str:
+    """
+    从 HTML 元素中提取文本，只在块级标签处换行。
+    内联标签（span/font/a/strong/em 等）内的文本直接拼接，不插入换行。
+    """
+    parts: list[str] = []
+
+    for child in element.descendants:
+        if isinstance(child, NavigableString):
+            text = child.strip()
+            if text:
+                parts.append(text)
+        elif isinstance(child, Tag):
+            if child.name == "br":
+                parts.append("\n")
+            elif child.name in _BLOCK_TAGS:
+                parts.append("\n")
+
+    # 合并，清理多余空行
+    raw = "".join(parts)
+    lines = [line.strip() for line in raw.split("\n")]
+    # 去除连续空行
+    result_lines: list[str] = []
+    for line in lines:
+        if line or (result_lines and result_lines[-1]):
+            result_lines.append(line)
+    return "\n".join(result_lines).strip()
+
+
 async def fetch_notice_detail(notice: Notice) -> str:
     """获取通知详情内容和附件。返回正文文本，同时填充 notice.attachments"""
     if not notice.url:
@@ -859,13 +898,13 @@ async def fetch_notice_detail(notice: Notice) -> str:
             ]:
                 content_el = soup.select_one(selector)
                 if content_el:
-                    content = content_el.get_text(separator="\n", strip=True)
+                    content = _extract_block_text(content_el)
                     break
 
             if not content:
                 body = soup.select_one("body")
                 if body:
-                    content = body.get_text(separator="\n", strip=True)[:2000]
+                    content = _extract_block_text(body)[:2000]
 
             # 提取附件链接
             attachments = _extract_attachments(soup, url)
