@@ -254,10 +254,48 @@ async def _authenticate_cas(client: httpx.AsyncClient, cas_resp: httpx.Response)
         if name:
             form_data[name] = value
 
+    # 诊断：如果隐藏字段很少，尝试提取所有 input
+    if len(form_data) < 2:
+        logger.info("CAS 隐藏字段不足，尝试提取所有 input 字段...")
+        all_inputs = form.find_all("input")
+        for inp in all_inputs:
+            logger.debug(
+                f"  input: name={inp.get('name')}, type={inp.get('type')}, "
+                f"id={inp.get('id')}, value={inp.get('value', '')[:50]}"
+            )
+            # 收集非用户输入的字段（已有的不覆盖）
+            name = inp.get("name")
+            inp_type = (inp.get("type") or "").lower()
+            if name and name not in form_data and inp_type not in ("text", "password", "submit", "button"):
+                form_data[name] = inp.get("value", "")
+
+    # 检查页面中是否有 JS 生成的关键字段
+    # 北邮 CAS 可能把 execution 放在 <script> 或 <p> 中
+    if "execution" not in form_data:
+        # 尝试从整个 HTML 中查找
+        exec_input = soup.find("input", attrs={"name": "execution"})
+        if exec_input:
+            form_data["execution"] = exec_input.get("value", "")
+            logger.info(f"CAS execution 字段从表单外找到")
+        else:
+            # 尝试正则匹配
+            import re as _re
+            exec_match = _re.search(r'name=["\']execution["\']\s+value=["\']([^"\']+)["\']', html)
+            if exec_match:
+                form_data["execution"] = exec_match.group(1)
+                logger.info(f"CAS execution 字段通过正则找到")
+
+    if "lt" not in form_data:
+        lt_input = soup.find("input", attrs={"name": "lt"})
+        if lt_input:
+            form_data["lt"] = lt_input.get("value", "")
+
     form_data["username"] = username
     form_data["password"] = password
     if "_eventId" not in form_data:
         form_data["_eventId"] = "submit"
+
+    logger.info(f"CAS 表单字段 (key 列表): {sorted(k for k in form_data if k != 'password')}")
 
     # 确定 POST 目标 URL
     action = form.get("action", "")
@@ -305,13 +343,33 @@ async def _authenticate_cas(client: httpx.AsyncClient, cas_resp: httpx.Response)
 
         # 检查是否仍在 CAS 登录页（认证失败）
         if _is_cas_login_page(resp.text):
-            # 检查错误信息
+            # 检查错误信息 —— 多种选择器
             error_soup = BeautifulSoup(resp.text, "lxml")
             error_el = error_soup.select_one(
                 ".errors, .alert-danger, #msg, .login-error, "
-                '[class*="error"], [class*="Error"]'
+                '[class*="error"], [class*="Error"], '
+                '#errorShow, .error-text, .cas-error, '
+                '.login-tips, #showErrorTip, #errorTip'
             )
-            error_msg = error_el.get_text(strip=True) if error_el else "未知错误"
+            error_msg = error_el.get_text(strip=True) if error_el else ""
+            if not error_msg:
+                # 尝试从 span/div 内容中查找错误文本
+                for tag in error_soup.find_all(['span', 'div', 'p']):
+                    text = tag.get_text(strip=True)
+                    if any(kw in text for kw in [
+                        '错误', '失败', '误', 'error', 'Error',
+                        '密码', '用户名', '无效', '锁定', '禁用',
+                        'invalid', 'Invalid', 'incorrect', 'locked'
+                    ]):
+                        error_msg = text
+                        break
+            if not error_msg:
+                error_msg = "未知错误"
+                # 输出页面中的所有文本帮助诊断
+                body = error_soup.find("body")
+                if body:
+                    body_text = body.get_text(separator=' | ', strip=True)[:500]
+                    logger.error(f"CAS 登录页 body 文本: {body_text}")
             logger.error(f"CAS 认证失败: {error_msg}")
             return False
 
