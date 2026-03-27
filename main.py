@@ -83,32 +83,38 @@ class BuptNoticePlugin(Star):
         """执行登录流程：获取二维码 → 发送 → 等待扫码"""
         from .auth import get_qrcode_and_wait as _login
 
+        # 删除旧二维码文件
+        qr_path = os.path.join(os.path.dirname(__file__), "data", "qrcode.png")
+        if os.path.exists(qr_path):
+            os.remove(qr_path)
+
         # 在后台启动 Playwright 登录
         login_task = asyncio.create_task(_login(timeout))
 
-        # 等待二维码生成（最多 20 秒）
-        qr_path = os.path.join(os.path.dirname(__file__), "data", "qrcode.png")
-        for _ in range(40):
+        # 等待二维码生成（最多 30 秒）
+        qr_sent = False
+        for _ in range(60):
             await asyncio.sleep(0.5)
             if os.path.exists(qr_path):
                 # 检查文件是否写入完成（大小 > 0 且稳定）
                 size = os.path.getsize(qr_path)
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)
                 if os.path.getsize(qr_path) == size and size > 0:
+                    # 发送二维码给用户
+                    chain = MessageChain() \
+                        .message("📱 请使用微信/企业微信扫描以下二维码登录 WebVPN：") \
+                        .file_image(qr_path)
+                    await self.context.send_message(event.unified_msg_origin, chain)
+                    qr_sent = True
                     break
-        else:
-            # 超时，等待任务完成
-            result = await login_task
-            return result
-
-        # 发送二维码给用户
-        chain = MessageChain() \
-            .message("📱 请使用微信/企业微信扫描以下二维码登录 WebVPN：") \
-            .file_image(qr_path)
-        await self.context.send_message(event.unified_msg_origin, chain)
 
         # 等待登录完成
         qr_result_path, cookies = await login_task
+
+        if not qr_sent and qr_result_path:
+            # 晚了一步但二维码已生成，说明登录流程已结束
+            pass
+
         return qr_result_path, cookies
 
     @bupt.command("status", alias={"状态"})
