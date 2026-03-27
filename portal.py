@@ -19,22 +19,16 @@ from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_notices.json")
 
-# 北邮常用通知源（使用 JSON API 端点 get-list.html）
+# 北邮常用通知源
 NOTICE_SOURCES = {
+    "my_tzgg": {
+        "name": "校内通知",
+        "url": "http://my.bupt.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1154",
+    },
     "webapp_tzgg": {
-        "name": "通知公告",
+        "name": "通知公告(webapp)",
         "url": "https://webapp.bupt.edu.cn/extensions/wap/news/get-list.html?p=1&type=tzgg",
         "type": "tzgg",
-    },
-    "webapp_xnxw": {
-        "name": "校内新闻",
-        "url": "https://webapp.bupt.edu.cn/extensions/wap/news/get-list.html?p=1&type=xnxw",
-        "type": "xnxw",
-    },
-    "my_portal": {
-        "name": "信息门户",
-        "url": "https://my.bupt.edu.cn/",
-        "type": None,
     },
 }
 
@@ -120,14 +114,17 @@ async def fetch_notices(
                           "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         }
     ) as client:
-        # 爬取 webapp 通知公告
+        # 爬取所有通知源
         for source_key, source_info in NOTICE_SOURCES.items():
-            if source_key == "my_portal":
-                continue  # 信息门户单独处理
             try:
-                notices = await _fetch_webapp_notices(
-                    client, source_info["url"], source_info["name"]
-                )
+                if source_key == "my_tzgg":
+                    notices = await _fetch_my_bupt_notices(
+                        client, source_info["url"], source_info["name"]
+                    )
+                else:
+                    notices = await _fetch_webapp_notices(
+                        client, source_info["url"], source_info["name"]
+                    )
                 all_notices.extend(notices)
             except Exception as e:
                 logger.error(f"获取 {source_info['name']} 失败: {e}")
@@ -135,17 +132,10 @@ async def fetch_notices(
         # 如果指定了自定义 URL
         if portal_url and portal_url not in [s["url"] for s in NOTICE_SOURCES.values()]:
             try:
-                notices = await _fetch_generic_page(client, portal_url, "自定义源")
+                notices = await _fetch_my_bupt_notices(client, portal_url, "自定义源")
                 all_notices.extend(notices)
             except Exception as e:
                 logger.error(f"获取自定义源失败: {e}")
-
-        # 尝试信息门户
-        try:
-            notices = await _fetch_my_portal(client)
-            all_notices.extend(notices)
-        except Exception as e:
-            logger.debug(f"获取信息门户失败（可能需要额外认证）: {e}")
 
     # 过滤已推送的
     new_notices = [n for n in all_notices if n.digest() not in seen]
@@ -177,7 +167,19 @@ async def fetch_latest_notice() -> Notice | None:
                           "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         }
     ) as client:
-        # 从通知公告获取
+        # 优先从信息门户校内通知获取
+        try:
+            notices = await _fetch_my_bupt_notices(
+                client,
+                NOTICE_SOURCES["my_tzgg"]["url"],
+                NOTICE_SOURCES["my_tzgg"]["name"],
+            )
+            if notices:
+                return notices[0]
+        except Exception as e:
+            logger.error(f"获取最新通知失败: {e}")
+
+        # 回退到 webapp
         try:
             notices = await _fetch_webapp_notices(
                 client,
@@ -187,9 +189,171 @@ async def fetch_latest_notice() -> Notice | None:
             if notices:
                 return notices[0]
         except Exception as e:
-            logger.error(f"获取最新通知失败: {e}")
+            logger.error(f"获取 webapp 最新通知失败: {e}")
 
     return None
+
+
+async def _fetch_my_bupt_notices(
+    client: httpx.AsyncClient, url: str, source_name: str
+) -> list[Notice]:
+    """
+    爬取 my.bupt.edu.cn 的 list.jsp 通知页面（服务端渲染 HTML）
+    URL 格式: http://my.bupt.edu.cn/list.jsp?urltype=tree.TreeTempUrl&wbtreeid=1154
+    """
+    vpn_url = encode_webvpn_url(url)
+    logger.info(f"正在访问 {source_name}: {vpn_url}")
+
+    resp = await client.get(vpn_url)
+    logger.info(
+        f"{source_name} 响应: status={resp.status_code}, "
+        f"content-type={resp.headers.get('content-type', 'unknown')}, "
+        f"body_len={len(resp.text)}"
+    )
+
+    if resp.status_code != 200:
+        logger.warning(f"访问 {source_name} 返回 {resp.status_code}")
+        if "扫码登录" in resp.text or "do-login" in resp.text:
+            logger.warning("检测到未授权，可能需要重新登录")
+        return []
+
+    html = resp.text
+    logger.debug(f"{source_name} 响应前800字符: {html[:800]}")
+
+    soup = BeautifulSoup(html, "lxml")
+    notices = []
+
+    # my.bupt.edu.cn 的通知列表通常是 <li> 列表或 <table> 格式
+    # 自适应多种布局
+
+    # 策略1: 查找包含通知链接的列表项（最常见）
+    # 典型结构: <li><a href="...">标题</a><span>日期</span></li>
+    candidate_links = []
+
+    # 尝试多种选择器
+    for selector in [
+        # 常见的通知列表选择器
+        ".list-item a", ".news_list li a", ".notice_list li a",
+        ".listleft li a", ".listright li a",
+        "ul.list li a", "ul.news li a",
+        # 通用 CMS 列表
+        ".column-news-list li a", ".wp_article_list li a",
+        "div.list ul li a", "div.content ul li a",
+        # 更宽泛的选择器
+        "li a[href*='view']", "li a[href*='detail']",
+        "li a[href*='urltype']", "li a[href*='content']",
+    ]:
+        links = soup.select(selector)
+        if links and len(links) >= 2:
+            candidate_links = links
+            logger.info(f"{source_name} 选择器 '{selector}' 匹配到 {len(links)} 条")
+            break
+
+    # 策略2: 如果没找到，查找所有 <li> 下的 <a>
+    if not candidate_links:
+        all_lis = soup.find_all("li")
+        for li in all_lis:
+            a = li.find("a", href=True)
+            if a:
+                text = a.get_text(strip=True)
+                if text and 5 < len(text) < 200:
+                    candidate_links.append(a)
+        if candidate_links:
+            logger.info(f"{source_name} 从所有 <li><a> 中找到 {len(candidate_links)} 条")
+
+    # 策略3: 查找表格中的链接
+    if not candidate_links:
+        for a in soup.select("table a[href]"):
+            text = a.get_text(strip=True)
+            if text and 5 < len(text) < 200:
+                candidate_links.append(a)
+        if candidate_links:
+            logger.info(f"{source_name} 从 <table><a> 中找到 {len(candidate_links)} 条")
+
+    # 策略4: 最宽泛 - 页面所有合理链接
+    if not candidate_links:
+        for a in soup.find_all("a", href=True):
+            text = a.get_text(strip=True)
+            href = a.get("href", "")
+            # 过滤掉导航和无关链接
+            if not text or len(text) < 5 or len(text) > 200:
+                continue
+            if text in ("首页", "返回", "更多", "下一页", "上一页", "登录"):
+                continue
+            if any(x in href for x in ["javascript:", "#", "login", "logout"]):
+                continue
+            candidate_links.append(a)
+        if candidate_links:
+            logger.info(f"{source_name} 从所有 <a> 中找到 {len(candidate_links)} 条")
+
+    if not candidate_links:
+        logger.warning(f"{source_name} 未找到任何通知链接。页面标题: {soup.title.string if soup.title else 'N/A'}")
+        # 输出页面结构帮助诊断
+        body = soup.find("body")
+        if body:
+            tags = [tag.name for tag in body.find_all(recursive=False)]
+            logger.debug(f"{source_name} body 直接子元素: {tags[:20]}")
+        return []
+
+    for a in candidate_links:
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+
+        if not title or len(title) < 3:
+            continue
+
+        # 补全 URL
+        full_url = href
+        if href.startswith("/"):
+            full_url = "http://my.bupt.edu.cn" + href
+        elif not href.startswith("http"):
+            full_url = "http://my.bupt.edu.cn/" + href
+
+        # 获取日期（通常在同级或父级的 span/td 中）
+        date_str = _extract_date_near(a)
+
+        notices.append(Notice(
+            id=href or hashlib.md5(title.encode()).hexdigest()[:12],
+            title=title,
+            source=source_name,
+            url=full_url,
+            date=date_str,
+        ))
+
+    logger.info(f"{source_name} 解析完成，获取 {len(notices)} 条通知")
+    return notices
+
+
+def _extract_date_near(element) -> str:
+    """尝试从元素附近提取日期文本"""
+    date_pattern = re.compile(r'\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}')
+
+    # 检查同级兄弟元素
+    for sibling in element.next_siblings:
+        if hasattr(sibling, 'get_text'):
+            text = sibling.get_text(strip=True)
+            match = date_pattern.search(text)
+            if match:
+                return match.group()
+
+    # 检查父元素中的其他文本
+    parent = element.parent
+    if parent:
+        # 查找 span/td/em 等日期容器
+        for tag in parent.find_all(['span', 'td', 'em', 'time', 'div']):
+            if tag != element and tag not in element.parents:
+                text = tag.get_text(strip=True)
+                match = date_pattern.search(text)
+                if match:
+                    return match.group()
+
+        # 检查父元素的纯文本
+        text = parent.get_text(strip=True)
+        match = date_pattern.search(text)
+        if match:
+            return match.group()
+
+    return ""
 
 
 async def _fetch_webapp_notices(
@@ -290,55 +454,6 @@ async def _fetch_webapp_notices(
     return notices
 
 
-async def _fetch_my_portal(client: httpx.AsyncClient) -> list[Notice]:
-    """爬取信息门户消息"""
-    portal_url = NOTICE_SOURCES["my_portal"]["url"]
-    vpn_url = encode_webvpn_url(portal_url)
-
-    resp = await client.get(vpn_url)
-    if resp.status_code != 200:
-        return []
-
-    # 信息门户可能有多种格式，尝试解析
-    html = resp.text
-    soup = BeautifulSoup(html, "lxml")
-
-    notices = []
-
-    # 尝试查找常见的通知元素
-    for selector in [
-        ".notice-list li", ".msg-list li", ".news-list li",
-        "table.notice tr", ".todo-list li",
-        "[class*='notice'] li", "[class*='msg'] li",
-        ".list-item", ".news-item", ".notice-item",
-    ]:
-        items = soup.select(selector)
-        if items:
-            for i, item in enumerate(items):
-                link = item.select_one("a")
-                if not link:
-                    continue
-                title = link.get_text(strip=True)
-                href = link.get("href", "")
-                if not title:
-                    continue
-
-                date_el = item.select_one(
-                    ".date, .time, [class*='date'], [class*='time'], span:last-child"
-                )
-                date_str = date_el.get_text(strip=True) if date_el else ""
-
-                notices.append(Notice(
-                    id=href or f"portal_{i}",
-                    title=title,
-                    source="信息门户",
-                    url=href,
-                    date=date_str,
-                ))
-            break
-
-    return notices
-
 
 async def _fetch_generic_page(
     client: httpx.AsyncClient, url: str, source_name: str
@@ -425,7 +540,11 @@ async def fetch_notice_detail(notice: Notice) -> str:
     # 补全 URL
     url = notice.url
     if url.startswith("/"):
-        url = "https://webapp.bupt.edu.cn" + url
+        # 根据 source 和 URL 特征判断域名
+        if "my.bupt.edu.cn" in (notice.url or "") or notice.source == "校内通知":
+            url = "http://my.bupt.edu.cn" + url
+        else:
+            url = "https://webapp.bupt.edu.cn" + url
 
     if not url.startswith("http"):
         return ""
@@ -450,6 +569,9 @@ async def fetch_notice_detail(notice: Notice) -> str:
                 ".content", ".article-content", ".detail-content",
                 ".news-content", "#content", ".text-content",
                 "article", ".entry-content",
+                # my.bupt.edu.cn 的 CMS 选择器
+                "#vsb_content", ".v_news_content", ".wp_articlecontent",
+                ".winstyle_articlecontent", "#articleContent",
             ]:
                 content_el = soup.select_one(selector)
                 if content_el:
