@@ -1,0 +1,17 @@
+# 运行时数据
+data/
+
+# 调研文档
+research/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/

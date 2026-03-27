@@ -1,0 +1,54 @@
+{
+  "check_interval": {
+    "description": "检查新通知的间隔（分钟）",
+    "type": "int",
+    "default": 30
+  },
+  "login_timeout": {
+    "description": "等待扫码登录的超时时间（秒）",
+    "type": "int",
+    "default": 120
+  },
+  "email_enabled": {
+    "description": "是否启用邮件推送",
+    "type": "bool",
+    "default": false
+  },
+  "smtp_server": {
+    "description": "SMTP 邮件服务器地址",
+    "type": "string",
+    "default": "smtp.qq.com",
+    "hint": "例如 smtp.qq.com, smtp.163.com"
+  },
+  "smtp_port": {
+    "description": "SMTP 端口",
+    "type": "int",
+    "default": 465
+  },
+  "smtp_user": {
+    "description": "SMTP 用户名（发件邮箱）",
+    "type": "string",
+    "default": ""
+  },
+  "smtp_password": {
+    "description": "SMTP 密码或授权码",
+    "type": "string",
+    "default": ""
+  },
+  "email_to": {
+    "description": "接收通知的邮箱地址",
+    "type": "string",
+    "default": ""
+  },
+  "portal_url": {
+    "description": "信息门户通知页面 URL（校内地址，插件会自动通过 WebVPN 访问）",
+    "type": "string",
+    "default": "https://my.bupt.edu.cn/",
+    "hint": "也可设置为 https://webapp.bupt.edu.cn/extensions/wap/news/list.html?type=tzgg"
+  },
+  "max_notices": {
+    "description": "每次最多推送的通知条数",
+    "type": "int",
+    "default": 10
+  }
+}

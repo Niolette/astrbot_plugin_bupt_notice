@@ -1,0 +1,8 @@
+name: astrbot_plugin_bupt_notice
+desc: "北京邮电大学信息门户通知爬取与推送插件，支持WebVPN扫码登录、QQ/邮件推送"
+version: "1.0.0"
+author: "notice_share"
+repo: ""
+display_name: "北邮通知推送"
+support_platforms:
+  - aiocqhttp
