@@ -3,7 +3,7 @@ AstrBot 北邮信息门户通知推送插件
 功能:
   - WebVPN 扫码登录（二维码通过 QQ 转发）
   - 定期爬取信息门户通知
-  - QQ 消息推送 + 邮件推送
+  - 邮件推送
 """
 import asyncio
 import os
@@ -14,7 +14,7 @@ from astrbot.api.star import Context, Star
 
 from .auth import get_qrcode_and_wait, check_session_valid
 from .portal import fetch_notices, fetch_latest_notice, mark_seen, Notice, fetch_notice_detail, set_cas_credentials
-from .mailer import send_email, format_notices_text
+from .mailer import send_email
 from .webvpn import load_cookies
 
 
@@ -24,8 +24,6 @@ class BuptNoticePlugin(Star):
         self.config = config
         self.running = True
         self._login_lock = asyncio.Lock()
-        self._subscriber_umo: str | None = None
-        self._umo_file = os.path.join(os.path.dirname(__file__), "data", "subscriber.txt")
 
         # 设置 CAS 凭据
         cas_user = self.config.get("cas_username", "")
@@ -36,28 +34,10 @@ class BuptNoticePlugin(Star):
         else:
             logger.warning("CAS 凭据未配置（cas_username / cas_password），信息门户通知需要 CAS 认证")
 
-        # 加载已保存的订阅者
-        self._load_subscriber()
-
         # 启动定时任务
         interval = self.config.get("check_interval", 30)
         if interval > 0:
             asyncio.create_task(self._periodic_check(interval))
-
-    def _load_subscriber(self):
-        """加载订阅者 UMO"""
-        if os.path.exists(self._umo_file):
-            try:
-                with open(self._umo_file, 'r') as f:
-                    self._subscriber_umo = f.read().strip() or None
-            except OSError:
-                pass
-
-    def _save_subscriber(self):
-        """保存订阅者 UMO"""
-        os.makedirs(os.path.dirname(self._umo_file), exist_ok=True)
-        with open(self._umo_file, 'w') as f:
-            f.write(self._subscriber_umo or "")
 
     # ==================== 指令 ====================
 
@@ -142,21 +122,19 @@ class BuptNoticePlugin(Star):
 
         valid = await check_session_valid(cookies)
         if valid:
-            sub_status = "已订阅" if self._subscriber_umo else "未订阅"
             interval = self.config.get("check_interval", 30)
-            email_status = "已启用" if self.config.get("email_enabled", False) else "未启用"
+            email_to = self.config.get("email_to", "")
             yield event.plain_result(
                 f"✅ WebVPN 会话有效\n"
-                f"📬 自动推送: {sub_status}\n"
                 f"⏱️ 检查间隔: {interval} 分钟\n"
-                f"📧 邮件推送: {email_status}"
+                f"📧 邮件推送: {email_to or '未配置'}"
             )
         else:
             yield event.plain_result("⚠️ 会话已过期，请使用 /bupt login 重新登录")
 
     @bupt.command("check", alias={"查看", "通知"})
     async def cmd_check(self, event: AstrMessageEvent):
-        """手动检查最新通知（含详情内容）"""
+        """手动检查最新通知并通过邮件推送"""
         cookies = load_cookies()
         if not cookies:
             yield event.plain_result("❌ 未登录，请先使用 /bupt login 登录")
@@ -189,16 +167,20 @@ class BuptNoticePlugin(Star):
             except Exception as e:
                 logger.warning(f"获取通知详情失败 ({notice.title}): {e}")
 
-        # 推送通知到 QQ
-        text = format_notices_text(notices)
-        yield event.plain_result(text)
+        # 邮件推送
+        try:
+            await self._send_notices_email(notices)
+            yield event.plain_result(f"📧 已通过邮件发送 {len(notices)} 条通知")
+        except Exception as e:
+            logger.error(f"邮件推送失败: {e}")
+            yield event.plain_result(f"❌ 邮件发送失败: {e}")
 
         # 标记为已推送
         mark_seen(notices)
 
     @bupt.command("latest", alias={"最新", "最新通知"})
     async def cmd_latest(self, event: AstrMessageEvent):
-        """获取最新的一条校内通知"""
+        """获取最新的一条校内通知并通过邮件推送"""
         cookies = load_cookies()
         if not cookies:
             yield event.plain_result("❌ 未登录，请先使用 /bupt login 登录")
@@ -218,39 +200,15 @@ class BuptNoticePlugin(Star):
             return
 
         # 获取详情内容
-        content = await fetch_notice_detail(notice)
+        notice.content = await fetch_notice_detail(notice)
 
-        result = f"📢 最新校内通知\n"
-        result += f"━━━━━━━━━━━━━━━━━━━\n"
-        result += f"📄 {notice.title}\n"
-        if notice.date:
-            result += f"📅 {notice.date}\n"
-        if notice.source:
-            result += f"📂 {notice.source}\n"
-        if notice.author:
-            result += f"✍️ {notice.author}\n"
-        result += f"━━━━━━━━━━━━━━━━━━━\n"
-        result += content[:1500] if content else "（无法获取详情内容）"
-
-        yield event.plain_result(result)
-
-    @bupt.command("subscribe", alias={"订阅"})
-    async def cmd_subscribe(self, event: AstrMessageEvent):
-        """订阅自动通知推送（当前会话）"""
-        self._subscriber_umo = event.unified_msg_origin
-        self._save_subscriber()
-        interval = self.config.get("check_interval", 30)
-        yield event.plain_result(
-            f"✅ 已订阅自动推送\n"
-            f"每 {interval} 分钟检查一次新通知，有更新时将自动推送到本会话。"
-        )
-
-    @bupt.command("unsubscribe", alias={"取消订阅"})
-    async def cmd_unsubscribe(self, event: AstrMessageEvent):
-        """取消自动推送"""
-        self._subscriber_umo = None
-        self._save_subscriber()
-        yield event.plain_result("✅ 已取消自动推送")
+        # 邮件推送
+        try:
+            await self._send_notices_email([notice])
+            yield event.plain_result(f"📧 已通过邮件发送: {notice.title}")
+        except Exception as e:
+            logger.error(f"邮件推送失败: {e}")
+            yield event.plain_result(f"❌ 邮件发送失败: {e}")
 
     @bupt.command("detail", alias={"详情"})
     async def cmd_detail(self, event: AstrMessageEvent, index: int = 1):
@@ -277,16 +235,15 @@ class BuptNoticePlugin(Star):
             return
 
         notice = notices[index - 1]
-        content = await fetch_notice_detail(notice)
+        notice.content = await fetch_notice_detail(notice)
 
-        result = f"📄 {notice.title}\n"
-        if notice.date:
-            result += f"📅 {notice.date}\n"
-        if notice.source:
-            result += f"📂 {notice.source}\n"
-        result += f"\n{content[:1500] if content else '（无法获取详情内容）'}"
-
-        yield event.plain_result(result)
+        # 邮件推送
+        try:
+            await self._send_notices_email([notice])
+            yield event.plain_result(f"📧 已通过邮件发送: {notice.title}")
+        except Exception as e:
+            logger.error(f"邮件推送失败: {e}")
+            yield event.plain_result(f"❌ 邮件发送失败: {e}")
 
     @bupt.command("help", alias={"帮助"})
     async def cmd_help(self, event: AstrMessageEvent):
@@ -295,21 +252,31 @@ class BuptNoticePlugin(Star):
             "📢 北邮通知推送插件 帮助\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "/bupt login  - 扫码登录 WebVPN\n"
-            "/bupt status - 查看登录和订阅状态\n"
-            "/bupt check  - 手动查看新通知\n"
-            "/bupt latest - 获取最新一条校内通知\n"
-            "/bupt detail <序号> - 查看通知详情\n"
-            "/bupt subscribe - 订阅自动推送\n"
-            "/bupt unsubscribe - 取消自动推送\n"
+            "/bupt status - 查看登录和推送状态\n"
+            "/bupt check  - 手动获取通知并发送邮件\n"
+            "/bupt latest - 获取最新通知并发送邮件\n"
+            "/bupt detail <序号> - 获取指定通知并发送邮件\n"
             "/bupt help   - 显示本帮助\n"
             "━━━━━━━━━━━━━━━━━━━\n"
-            "💡 首次使用请先 /bupt login"
+            "💡 首次使用请先 /bupt login\n"
+            "📧 所有通知内容均通过邮件推送"
         )
 
     # ==================== 定时任务 ====================
 
+    async def _send_notices_email(self, notices: list[Notice]):
+        """通过邮件发送通知"""
+        await send_email(
+            notices=notices,
+            smtp_server=self.config.get("smtp_server", "smtp.qq.com"),
+            smtp_port=self.config.get("smtp_port", 465),
+            smtp_user=self.config.get("smtp_user", ""),
+            smtp_password=self.config.get("smtp_password", ""),
+            to_addr=self.config.get("email_to", ""),
+        )
+
     async def _periodic_check(self, interval_minutes: int):
-        """定期检查新通知并推送"""
+        """定期检查新通知并通过邮件推送"""
         await asyncio.sleep(10)  # 启动后等待 10 秒再开始
         logger.info(f"北邮通知定时检查已启动，间隔 {interval_minutes} 分钟")
 
@@ -319,10 +286,6 @@ class BuptNoticePlugin(Star):
 
                 if not self.running:
                     break
-
-                # 检查是否有订阅者
-                if not self._subscriber_umo:
-                    continue
 
                 # 检查 cookies 是否有效
                 cookies = load_cookies()
@@ -355,12 +318,7 @@ class BuptNoticePlugin(Star):
                                 chain = MessageChain().message("❌ 获取二维码失败，请手动 /bupt login")
                                 await self.context.send_message(admin_umo, chain)
                     else:
-                        # 无管理员配置或正在登录中，仅发提醒
-                        if self._subscriber_umo:
-                            chain = MessageChain().message(
-                                "⚠️ WebVPN 会话已过期，请使用 /bupt login 重新登录"
-                            )
-                            await self.context.send_message(self._subscriber_umo, chain)
+                        logger.warning("无管理员配置或正在登录中，跳过本次检查")
                     continue
 
                 # 获取新通知
@@ -385,24 +343,12 @@ class BuptNoticePlugin(Star):
                     except Exception as e:
                         logger.warning(f"获取通知详情失败 ({notice.title}): {e}")
 
-                # QQ 推送
-                text = format_notices_text(notices)
-                chain = MessageChain().message(text)
-                await self.context.send_message(self._subscriber_umo, chain)
-
                 # 邮件推送
-                if self.config.get("email_enabled", False):
-                    try:
-                        await send_email(
-                            notices=notices,
-                            smtp_server=self.config.get("smtp_server", "smtp.qq.com"),
-                            smtp_port=self.config.get("smtp_port", 465),
-                            smtp_user=self.config.get("smtp_user", ""),
-                            smtp_password=self.config.get("smtp_password", ""),
-                            to_addr=self.config.get("email_to", ""),
-                        )
-                    except Exception as e:
-                        logger.error(f"邮件推送失败: {e}")
+                try:
+                    await self._send_notices_email(notices)
+                    logger.info(f"已通过邮件推送 {len(notices)} 条通知")
+                except Exception as e:
+                    logger.error(f"邮件推送失败: {e}")
 
                 # 标记为已推送
                 mark_seen(notices)

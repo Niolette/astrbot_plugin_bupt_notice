@@ -21,11 +21,6 @@
     "type": "int",
     "default": 120
   },
-  "email_enabled": {
-    "description": "是否启用邮件推送",
-    "type": "bool",
-    "default": false
-  },
   "smtp_server": {
     "description": "SMTP 邮件服务器地址",
     "type": "string",
