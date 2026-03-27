@@ -119,9 +119,11 @@ async def send_email(
     msg = MIMEMultipart("mixed")
     msg["From"] = smtp_user
     msg["To"] = to_addr
-    msg["Subject"] = Header(
-        f"北邮通知更新 ({len(notices)} 条新通知)", "utf-8"
-    )
+    if len(notices) == 1:
+        subject = notices[0].title
+    else:
+        subject = f"{notices[0].title} 等 {len(notices)} 条通知"
+    msg["Subject"] = Header(subject, "utf-8")
 
     # 正文部分（HTML + 纯文本备选）
     body_part = MIMEMultipart("alternative")
