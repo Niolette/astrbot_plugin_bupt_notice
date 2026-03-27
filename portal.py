@@ -468,84 +468,33 @@ async def _fetch_my_bupt_notices(
     soup = BeautifulSoup(html, "lxml")
     notices = []
 
-    # my.bupt.edu.cn 的通知列表通常是 <li> 列表或 <table> 格式
-    # 自适应多种布局
+    # =====================================================
+    #  my.bupt.edu.cn 信息门户通知列表解析
+    #  页面结构: 左侧为导航树(学院/分类)，右侧为通知列表
+    #  通知条目特征: 标题链接 + 发布部门 + 日期(YYYY-MM-DD)
+    #  需要过滤掉左侧导航的分类链接
+    # =====================================================
 
-    # 策略1: 查找包含通知链接的列表项（最常见）
-    # 典型结构: <li><a href="...">标题</a><span>日期</span></li>
-    candidate_links = []
+    date_pattern = re.compile(r'\d{4}-\d{1,2}-\d{1,2}')
 
-    # 尝试多种选择器
-    for selector in [
-        # 常见的通知列表选择器
-        ".list-item a", ".news_list li a", ".notice_list li a",
-        ".listleft li a", ".listright li a",
-        "ul.list li a", "ul.news li a",
-        # 通用 CMS 列表
-        ".column-news-list li a", ".wp_article_list li a",
-        "div.list ul li a", "div.content ul li a",
-        # 更宽泛的选择器
-        "li a[href*='view']", "li a[href*='detail']",
-        "li a[href*='urltype']", "li a[href*='content']",
-    ]:
-        links = soup.select(selector)
-        if links and len(links) >= 2:
-            candidate_links = links
-            logger.info(f"{source_name} 选择器 '{selector}' 匹配到 {len(links)} 条")
-            break
+    # 策略1: 查找所有包含 urltype 的链接，但要求附近有日期
+    all_links = soup.select("a[href*='urltype']")
+    logger.info(f"{source_name} 页面中 a[href*='urltype'] 共 {len(all_links)} 个")
 
-    # 策略2: 如果没找到，查找所有 <li> 下的 <a>
-    if not candidate_links:
-        all_lis = soup.find_all("li")
-        for li in all_lis:
-            a = li.find("a", href=True)
-            if a:
-                text = a.get_text(strip=True)
-                if text and 5 < len(text) < 200:
-                    candidate_links.append(a)
-        if candidate_links:
-            logger.info(f"{source_name} 从所有 <li><a> 中找到 {len(candidate_links)} 条")
-
-    # 策略3: 查找表格中的链接
-    if not candidate_links:
-        for a in soup.select("table a[href]"):
-            text = a.get_text(strip=True)
-            if text and 5 < len(text) < 200:
-                candidate_links.append(a)
-        if candidate_links:
-            logger.info(f"{source_name} 从 <table><a> 中找到 {len(candidate_links)} 条")
-
-    # 策略4: 最宽泛 - 页面所有合理链接
-    if not candidate_links:
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(strip=True)
-            href = a.get("href", "")
-            # 过滤掉导航和无关链接
-            if not text or len(text) < 5 or len(text) > 200:
-                continue
-            if text in ("首页", "返回", "更多", "下一页", "上一页", "登录"):
-                continue
-            if any(x in href for x in ["javascript:", "#", "login", "logout"]):
-                continue
-            candidate_links.append(a)
-        if candidate_links:
-            logger.info(f"{source_name} 从所有 <a> 中找到 {len(candidate_links)} 条")
-
-    if not candidate_links:
-        logger.warning(f"{source_name} 未找到任何通知链接。页面标题: {soup.title.string if soup.title else 'N/A'}")
-        # 输出页面结构帮助诊断
-        body = soup.find("body")
-        if body:
-            tags = [tag.name for tag in body.find_all(recursive=False)]
-            logger.debug(f"{source_name} body 直接子元素: {tags[:20]}")
-        return []
-
-    for a in candidate_links:
+    for a in all_links:
         title = a.get_text(strip=True)
         href = a.get("href", "")
 
-        if not title or len(title) < 3:
+        if not title or len(title) < 5:
             continue
+
+        # 查找附近的日期文本 —— 这是区分通知和导航链接的关键
+        date_str = _extract_date_near(a)
+        if not date_str:
+            continue  # 没有日期的大概率是导航链接，跳过
+
+        # 提取发布部门（通常在日期附近）
+        author = _extract_author_near(a)
 
         # 补全 URL
         full_url = href
@@ -554,18 +503,53 @@ async def _fetch_my_bupt_notices(
         elif not href.startswith("http"):
             full_url = "http://my.bupt.edu.cn/" + href
 
-        # 获取日期（通常在同级或父级的 span/td 中）
-        date_str = _extract_date_near(a)
-
         notices.append(Notice(
             id=href or hashlib.md5(title.encode()).hexdigest()[:12],
             title=title,
             source=source_name,
             url=full_url,
             date=date_str,
+            author=author,
         ))
 
-    logger.info(f"{source_name} 解析完成，获取 {len(notices)} 条通知")
+    # 如果策略1 没结果，回退: 查找包含日期文本的 <li> 或 <tr>
+    if not notices:
+        logger.info(f"{source_name} 策略1 未匹配，尝试策略2（按日期文本查找）")
+        for container in soup.find_all(['li', 'tr', 'div']):
+            text = container.get_text(strip=True)
+            date_match = date_pattern.search(text)
+            if not date_match:
+                continue
+
+            a = container.find("a", href=True)
+            if not a:
+                continue
+
+            link_text = a.get_text(strip=True)
+            if not link_text or len(link_text) < 5:
+                continue
+
+            href = a.get("href", "")
+            full_url = href
+            if href.startswith("/"):
+                full_url = "http://my.bupt.edu.cn" + href
+            elif not href.startswith("http"):
+                full_url = "http://my.bupt.edu.cn/" + href
+
+            # 去重
+            if any(n.id == href for n in notices):
+                continue
+
+            notices.append(Notice(
+                id=href or hashlib.md5(link_text.encode()).hexdigest()[:12],
+                title=link_text,
+                source=source_name,
+                url=full_url,
+                date=date_match.group(),
+                author=_extract_author_near(a),
+            ))
+
+    logger.info(f"{source_name} 解析完成，获取 {len(notices)} 条通知（已过滤无日期的导航链接）")
     return notices
 
 
@@ -597,6 +581,43 @@ def _extract_date_near(element) -> str:
         match = date_pattern.search(text)
         if match:
             return match.group()
+
+    return ""
+
+
+def _extract_author_near(element) -> str:
+    """尝试从元素附近提取发布部门/作者"""
+    date_pattern = re.compile(r'\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2}')
+
+    # 在兄弟元素和父元素中查找非日期、非标题的短文本
+    candidates = []
+
+    # 检查同级兄弟元素
+    for sibling in element.next_siblings:
+        if hasattr(sibling, 'get_text'):
+            text = sibling.get_text(strip=True)
+            if text and not date_pattern.match(text) and 2 < len(text) < 50:
+                candidates.append(text)
+
+    # 检查父元素中的子元素
+    parent = element.parent
+    if parent:
+        for tag in parent.find_all(['span', 'td', 'em', 'div', 'p']):
+            if tag == element or tag in element.parents:
+                continue
+            text = tag.get_text(strip=True)
+            if text and not date_pattern.match(text) and 2 < len(text) < 50:
+                if text not in candidates:
+                    candidates.append(text)
+
+    # 返回第一个看起来像部门名的文本
+    for c in candidates:
+        # 排除数字、日期、标题本身
+        if date_pattern.search(c):
+            continue
+        if c == element.get_text(strip=True):
+            continue
+        return c
 
     return ""
 
