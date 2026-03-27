@@ -19,19 +19,22 @@ from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_notices.json")
 
-# 北邮常用通知源
+# 北邮常用通知源（使用 JSON API 端点 get-list.html）
 NOTICE_SOURCES = {
     "webapp_tzgg": {
         "name": "通知公告",
-        "url": "https://webapp.bupt.edu.cn/extensions/wap/news/list.html?type=tzgg",
+        "url": "https://webapp.bupt.edu.cn/extensions/wap/news/get-list.html?p=1&type=tzgg",
+        "type": "tzgg",
     },
     "webapp_xnxw": {
         "name": "校内新闻",
-        "url": "https://webapp.bupt.edu.cn/extensions/wap/news/list.html?type=xnxw",
+        "url": "https://webapp.bupt.edu.cn/extensions/wap/news/get-list.html?p=1&type=xnxw",
+        "type": "xnxw",
     },
     "my_portal": {
         "name": "信息门户",
         "url": "https://my.bupt.edu.cn/",
+        "type": None,
     },
 }
 
@@ -192,39 +195,99 @@ async def fetch_latest_notice() -> Notice | None:
 async def _fetch_webapp_notices(
     client: httpx.AsyncClient, url: str, source_name: str
 ) -> list[Notice]:
-    """爬取 webapp 通知页"""
+    """通过 JSON API (get-list.html) 获取 webapp 通知"""
     vpn_url = encode_webvpn_url(url)
-    logger.debug(f"正在访问: {vpn_url}")
+    logger.info(f"正在访问 {source_name}: {vpn_url}")
 
     resp = await client.get(vpn_url)
+    logger.info(f"{source_name} 响应: status={resp.status_code}, content-type={resp.headers.get('content-type', 'unknown')}, body_len={len(resp.text)}")
+
     if resp.status_code != 200:
         logger.warning(f"访问 {source_name} 返回 {resp.status_code}")
+        # 如果返回登录页，可能 session 失效
+        if "扫码登录" in resp.text or "do-login" in resp.text:
+            logger.warning("检测到未授权，可能需要重新登录")
         return []
 
-    html = resp.text
     notices = []
+    resp_text = resp.text
 
-    # 方式1: 尝试从 JavaScript 中提取 JSON 数据
-    json_match = re.search(r'var\s+listData\s*=\s*(\[.*?\]);', html, re.DOTALL)
-    if json_match:
-        try:
-            data = json.loads(json_match.group(1))
-            for item in data:
-                notices.append(Notice(
-                    id=str(item.get("id", "")),
-                    title=item.get("title", ""),
-                    source=source_name,
-                    url=item.get("url", ""),
-                    date=item.get("created", item.get("date", "")),
-                    author=item.get("author", ""),
-                ))
-            return notices
-        except json.JSONDecodeError:
-            pass
+    # 记录响应前 500 字符用于调试
+    logger.debug(f"{source_name} 响应内容前500字符: {resp_text[:500]}")
 
-    # 方式2: 从 HTML 解析
-    soup = BeautifulSoup(html, "lxml")
-    return _parse_notice_page(soup, source_name, url)
+    # 尝试解析 JSON
+    try:
+        result = resp.json()
+        logger.info(f"{source_name} JSON 解析成功，顶层键: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}")
+
+        # 情况1: {"data": {"tzgg": [...], ...}} 或 {"data": [...]}
+        data = result if isinstance(result, list) else result.get("data", result)
+
+        items_list = []
+        if isinstance(data, dict):
+            # data 是字典，遍历所有值找列表
+            for key, val in data.items():
+                logger.debug(f"  data['{key}'] type={type(val).__name__}, len={len(val) if isinstance(val, (list, dict, str)) else 'N/A'}")
+                if isinstance(val, list):
+                    items_list.extend(val)
+        elif isinstance(data, list):
+            items_list = data
+
+        logger.info(f"{source_name} 共找到 {len(items_list)} 条原始数据")
+
+        for item in items_list:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id", ""))
+            title = item.get("title", "")
+            if not title:
+                continue
+
+            content = item.get("text", "") or item.get("desc", "") or item.get("content", "")
+            created = item.get("created", 0)
+            author = item.get("author", "") or item.get("source", "")
+
+            # 时间戳转日期
+            date_str = ""
+            if created:
+                try:
+                    ts = int(created)
+                    # 如果是毫秒时间戳
+                    if ts > 1e12:
+                        ts = ts // 1000
+                    date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                except (ValueError, OSError):
+                    date_str = str(created)
+
+            # 提取 type 参数
+            classify_id = "tzgg"
+            if "type=" in url:
+                classify_id = url.split("type=")[-1].split("&")[0]
+
+            detail_url = f"https://webapp.bupt.edu.cn/extensions/wap/news/detail.html?id={item_id}&classify_id={classify_id}"
+
+            notices.append(Notice(
+                id=item_id,
+                title=title,
+                source=source_name,
+                url=detail_url,
+                date=date_str,
+                content=content,
+                author=author,
+            ))
+
+        logger.info(f"{source_name} 解析完成，获取 {len(notices)} 条通知")
+        return notices
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"{source_name} JSON 解析失败: {e}")
+
+    # JSON 失败，尝试 HTML 解析
+    logger.info(f"{source_name} 尝试 HTML 回退解析")
+    soup = BeautifulSoup(resp_text, "lxml")
+    notices = _parse_notice_page(soup, source_name, url)
+    logger.info(f"{source_name} HTML 解析获取 {len(notices)} 条通知")
+    return notices
 
 
 async def _fetch_my_portal(client: httpx.AsyncClient) -> list[Notice]:
