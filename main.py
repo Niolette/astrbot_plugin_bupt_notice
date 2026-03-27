@@ -150,7 +150,7 @@ class BuptNoticePlugin(Star):
 
     @bupt.command("check", alias={"查看", "通知"})
     async def cmd_check(self, event: AstrMessageEvent):
-        """手动检查最新通知"""
+        """手动检查最新通知（含详情内容）"""
         cookies = load_cookies()
         if not cookies:
             yield event.plain_result("❌ 未登录，请先使用 /bupt login 登录")
@@ -174,6 +174,14 @@ class BuptNoticePlugin(Star):
         if not notices:
             yield event.plain_result("📭 暂无新通知")
             return
+
+        # 获取每条通知的详情内容
+        for notice in notices:
+            try:
+                content = await fetch_notice_detail(notice)
+                notice.content = content
+            except Exception as e:
+                logger.warning(f"获取通知详情失败 ({notice.title}): {e}")
 
         # 推送通知到 QQ
         text = format_notices_text(notices)

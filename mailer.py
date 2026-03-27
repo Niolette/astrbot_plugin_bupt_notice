@@ -50,14 +50,21 @@ def format_notices_html(notices: list[Notice]) -> str:
 
 
 def format_notices_text(notices: list[Notice]) -> str:
-    """将通知列表格式化为纯文本"""
+    """将通知列表格式化为纯文本（含详情内容）"""
     lines = [f"📢 北邮通知更新 (共 {len(notices)} 条)\n"]
     for i, n in enumerate(notices, 1):
         date_part = f" ({n.date})" if n.date else ""
+        lines.append(f"━━━━━━━━━━━━━━━━━━━")
         lines.append(f"{i}. [{n.source}] {n.title}{date_part}")
         if n.content:
-            preview = n.content[:100] + ("..." if len(n.content) > 100 else "")
-            lines.append(f"   {preview}")
+            # 显示完整内容（限制 800 字符避免 QQ 消息过长）
+            content_text = n.content.strip()
+            if len(content_text) > 800:
+                content_text = content_text[:800] + "...(内容过长已截断)"
+            lines.append(f"{content_text}")
+        else:
+            lines.append("（未获取到详情内容）")
+        lines.append("")
     return "\n".join(lines)
 
 
