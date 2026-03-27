@@ -13,7 +13,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star
 
 from .auth import get_qrcode_and_wait, check_session_valid
-from .portal import fetch_notices, fetch_latest_notice, mark_seen, Notice, fetch_notice_detail
+from .portal import fetch_notices, fetch_latest_notice, mark_seen, Notice, fetch_notice_detail, set_cas_credentials
 from .mailer import send_email, format_notices_text
 from .webvpn import load_cookies
 
@@ -26,6 +26,15 @@ class BuptNoticePlugin(Star):
         self._login_lock = asyncio.Lock()
         self._subscriber_umo: str | None = None
         self._umo_file = os.path.join(os.path.dirname(__file__), "data", "subscriber.txt")
+
+        # 设置 CAS 凭据
+        cas_user = self.config.get("cas_username", "")
+        cas_pass = self.config.get("cas_password", "")
+        if cas_user and cas_pass:
+            set_cas_credentials(cas_user, cas_pass)
+            logger.info("CAS 凭据已加载")
+        else:
+            logger.warning("CAS 凭据未配置（cas_username / cas_password），信息门户通知需要 CAS 认证")
 
         # 加载已保存的订阅者
         self._load_subscriber()

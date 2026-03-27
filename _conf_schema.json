@@ -1,4 +1,16 @@
 {
+  "cas_username": {
+    "description": "北邮统一身份认证用户名（学号）",
+    "type": "string",
+    "default": "",
+    "hint": "用于自动登录 CAS 访问信息门户，WebVPN 扫码只提供网络隧道，CAS 需要单独认证"
+  },
+  "cas_password": {
+    "description": "北邮统一身份认证密码",
+    "type": "string",
+    "default": "",
+    "hint": "密码仅本地存储在 AstrBot 配置中"
+  },
   "check_interval": {
     "description": "检查新通知的间隔（分钟）",
     "type": "int",

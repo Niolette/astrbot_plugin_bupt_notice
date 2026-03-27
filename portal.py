@@ -14,7 +14,10 @@ from bs4 import BeautifulSoup
 
 from astrbot.api import logger
 
-from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies
+from .webvpn import encode_webvpn_url, cookies_to_httpx, load_cookies, save_cookies
+
+# CAS 认证凭据，由 main.py 初始化时设置
+_cas_credentials: dict[str, str] = {}
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_notices.json")
@@ -194,6 +197,167 @@ async def fetch_latest_notice() -> Notice | None:
     return None
 
 
+# ==================== CAS 认证 ====================
+
+def set_cas_credentials(username: str, password: str):
+    """由 main.py 初始化时调用，设置 CAS 凭据"""
+    _cas_credentials["username"] = username
+    _cas_credentials["password"] = password
+
+
+def _is_cas_login_page(html: str) -> bool:
+    """检测 HTML 是否为 CAS 登录页"""
+    return (
+        "<title>CAS Login" in html
+        or "<title>CAS – Central Authentication" in html
+        or 'id="cas-login"' in html
+        or 'name="execution"' in html and 'name="lt"' in html
+    )
+
+
+async def _authenticate_cas(client: httpx.AsyncClient, cas_resp: httpx.Response) -> bool:
+    """
+    对 CAS 登录页执行表单登录（标准 Apereo CAS 协议）。
+    1. 从 CAS 登录页 HTML 提取隐藏字段 (lt, execution, _eventId)
+    2. POST 用户名/密码到 CAS 登录端点
+    3. 跟随重定向链完成 CAS SSO（设置 CASTGC → service ticket → 回调）
+    4. 将新 cookie 持久化保存
+    """
+    username = _cas_credentials.get("username", "")
+    password = _cas_credentials.get("password", "")
+
+    if not username or not password:
+        logger.warning("CAS 凭据未配置（cas_username / cas_password）")
+        return False
+
+    html = cas_resp.text
+    cas_login_url = str(cas_resp.url)  # WebVPN 代理后的 CAS URL
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # 提取隐藏表单字段
+    form = soup.select_one('form#fm1, form#loginForm, form[action*="login"]')
+    if not form:
+        # 回退：查找任何包含 execution 字段的表单
+        form = soup.find("form")
+
+    if not form:
+        logger.error("CAS 登录页未找到表单")
+        logger.debug(f"CAS 页面前 500 字符: {html[:500]}")
+        return False
+
+    # 提取所有隐藏字段
+    form_data = {}
+    for inp in form.find_all("input", attrs={"type": "hidden"}):
+        name = inp.get("name")
+        value = inp.get("value", "")
+        if name:
+            form_data[name] = value
+
+    form_data["username"] = username
+    form_data["password"] = password
+    if "_eventId" not in form_data:
+        form_data["_eventId"] = "submit"
+
+    # 确定 POST 目标 URL
+    action = form.get("action", "")
+    if action:
+        if action.startswith("http"):
+            post_url = action
+        elif action.startswith("/"):
+            # 相对路径，拼接 WebVPN 代理的 base URL
+            from urllib.parse import urlparse
+            parsed = urlparse(cas_login_url)
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            # 对于 WebVPN 代理的路径，需要保留 /https/xxx 前缀
+            path_parts = parsed.path.split("/")
+            # WebVPN 路径格式: /https/[encrypted_host]/authserver/login
+            # 保留到 /https/[encrypted_host] 部分
+            if len(path_parts) >= 3:
+                vpn_prefix = "/".join(path_parts[:3])
+                post_url = f"{base}{vpn_prefix}{action}"
+            else:
+                post_url = f"{base}{action}"
+        else:
+            post_url = cas_login_url
+    else:
+        post_url = cas_login_url
+
+    logger.info(
+        f"CAS 表单登录: POST {post_url}, "
+        f"字段: {[k for k in form_data if k != 'password']}"
+    )
+
+    try:
+        resp = await client.post(
+            post_url,
+            data=form_data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": cas_login_url,
+            },
+        )
+
+        logger.info(
+            f"CAS POST 响应: status={resp.status_code}, "
+            f"final_url={resp.url}, body_len={len(resp.text)}"
+        )
+
+        # 检查是否仍在 CAS 登录页（认证失败）
+        if _is_cas_login_page(resp.text):
+            # 检查错误信息
+            error_soup = BeautifulSoup(resp.text, "lxml")
+            error_el = error_soup.select_one(
+                ".errors, .alert-danger, #msg, .login-error, "
+                '[class*="error"], [class*="Error"]'
+            )
+            error_msg = error_el.get_text(strip=True) if error_el else "未知错误"
+            logger.error(f"CAS 认证失败: {error_msg}")
+            return False
+
+        # 认证成功，持久化更新后的 cookies
+        _persist_client_cookies(client)
+
+        logger.info("CAS 认证成功")
+        return True
+
+    except Exception as e:
+        logger.error(f"CAS 表单登录异常: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+
+def _persist_client_cookies(client: httpx.AsyncClient):
+    """将 httpx client 当前的 cookies 追加保存到本地文件"""
+    existing = load_cookies() or []
+
+    # httpx Cookies → Playwright 格式 list[dict]
+    new_cookies = []
+    for cookie in client.cookies.jar:
+        new_cookies.append({
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain or "",
+            "path": cookie.path or "/",
+            "secure": str(cookie.path).startswith("https"),
+            "httpOnly": False,
+        })
+
+    # 合并：以 (name, domain, path) 为 key，新的覆盖旧的
+    cookie_map = {}
+    for c in existing:
+        key = (c["name"], c.get("domain", ""), c.get("path", "/"))
+        cookie_map[key] = c
+    for c in new_cookies:
+        key = (c["name"], c.get("domain", ""), c.get("path", "/"))
+        cookie_map[key] = c
+
+    merged = list(cookie_map.values())
+    save_cookies(merged)
+    logger.info(f"持久化 cookies: {len(existing)} → {len(merged)} 条")
+
+
 async def _fetch_my_bupt_notices(
     client: httpx.AsyncClient, url: str, source_name: str
 ) -> list[Notice]:
@@ -220,18 +384,26 @@ async def _fetch_my_bupt_notices(
     html = resp.text
 
     # 检测 CAS 登录页拦截
-    if "<title>CAS Login" in html or "<title>CAS – Central Authentication" in html:
-        logger.warning(
-            f"{source_name} 被 CAS 拦截，返回了 CAS 登录页。"
-            f"请执行 /bupt login 重新扫码登录以获取 CAS 会话。"
-            f"响应 URL: {resp.url}"
-        )
-        # 输出当前 cookie 名称列表帮助诊断
-        cookie_names = sorted(set(
-            f"{c.name}(path={c.path})" for c in client.cookies.jar
-        ))
-        logger.info(f"{source_name} 当前 cookies: {cookie_names}")
-        return []
+    if _is_cas_login_page(html):
+        logger.info(f"{source_name} 遇到 CAS 登录页，尝试自动 CAS 认证...")
+        cas_ok = await _authenticate_cas(client, resp)
+        if cas_ok:
+            # CAS 认证成功，重新请求原始页面
+            resp = await client.get(vpn_url)
+            html = resp.text
+            logger.info(
+                f"{source_name} CAS 认证后重试: status={resp.status_code}, "
+                f"body_len={len(html)}, final_url={resp.url}"
+            )
+            if _is_cas_login_page(html):
+                logger.error(f"{source_name} CAS 认证后仍被拦截")
+                return []
+        else:
+            logger.warning(
+                f"{source_name} CAS 自动认证失败。"
+                "请在插件配置中填写 cas_username 和 cas_password（北邮统一身份认证）"
+            )
+            return []
 
     logger.debug(f"{source_name} 响应前800字符: {html[:800]}")
 
