@@ -45,6 +45,11 @@ class Notice:
     date: str = ""
     content: str = ""
     author: str = ""
+    attachments: list = None  # [{"name": str, "url": str}]
+
+    def __post_init__(self):
+        if self.attachments is None:
+            self.attachments = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -793,7 +798,7 @@ def _parse_notice_page(soup: BeautifulSoup, source_name: str, base_url: str) -> 
 
 
 async def fetch_notice_detail(notice: Notice) -> str:
-    """获取通知详情内容"""
+    """获取通知详情内容和附件。返回正文文本，同时填充 notice.attachments"""
     if not notice.url:
         return ""
 
@@ -806,7 +811,6 @@ async def fetch_notice_detail(notice: Notice) -> str:
     # 补全 URL
     url = notice.url
     if url.startswith("/"):
-        # 根据 source 和 URL 特征判断域名
         if "my.bupt.edu.cn" in (notice.url or "") or notice.source == "校内通知":
             url = "http://my.bupt.edu.cn" + url
         else:
@@ -828,29 +832,119 @@ async def fetch_notice_detail(notice: Notice) -> str:
             if resp.status_code != 200:
                 return ""
 
-            soup = BeautifulSoup(resp.text, "lxml")
+            html = resp.text
 
-            # 查找正文内容
+            # 检测 CAS 拦截并自动认证
+            if _is_cas_login_page(html):
+                logger.info("获取详情时遇到 CAS，尝试自动认证...")
+                cas_ok = await _authenticate_cas(client, resp)
+                if cas_ok:
+                    resp = await client.get(vpn_url)
+                    html = resp.text
+                    if _is_cas_login_page(html):
+                        return ""
+                else:
+                    return ""
+
+            soup = BeautifulSoup(html, "lxml")
+
+            # 提取正文内容
+            content = ""
             for selector in [
+                "#vsb_content", ".v_news_content", ".wp_articlecontent",
+                ".winstyle_articlecontent", "#articleContent",
                 ".content", ".article-content", ".detail-content",
                 ".news-content", "#content", ".text-content",
                 "article", ".entry-content",
-                # my.bupt.edu.cn 的 CMS 选择器
-                "#vsb_content", ".v_news_content", ".wp_articlecontent",
-                ".winstyle_articlecontent", "#articleContent",
             ]:
                 content_el = soup.select_one(selector)
                 if content_el:
-                    return content_el.get_text(separator="\n", strip=True)
+                    content = content_el.get_text(separator="\n", strip=True)
+                    break
 
-            # Fallback: 取 body 文本
-            body = soup.select_one("body")
-            if body:
-                text = body.get_text(separator="\n", strip=True)
-                # 限制长度
-                return text[:2000]
+            if not content:
+                body = soup.select_one("body")
+                if body:
+                    content = body.get_text(separator="\n", strip=True)[:2000]
+
+            # 提取附件链接
+            attachments = _extract_attachments(soup, url)
+            notice.attachments = attachments
+            if attachments:
+                logger.info(f"通知 '{notice.title}' 发现 {len(attachments)} 个附件")
+
+            return content
 
     except Exception as e:
         logger.error(f"获取通知详情失败: {e}")
 
     return ""
+
+
+def _extract_attachments(soup: BeautifulSoup, base_url: str) -> list[dict]:
+    """从通知详情页提取附件链接"""
+    attachments = []
+    seen_urls = set()
+
+    # 常见附件扩展名
+    file_exts = (
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.zip', '.rar', '.7z', '.tar', '.gz',
+        '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+        '.txt', '.csv', '.rtf', '.wps', '.odt',
+    )
+
+    # 策略1: 查找显式标记的附件区域
+    for selector in [
+        '.fujian a', '.attachment a', '.accessory a',
+        '[class*="attach"] a', '[class*="file"] a',
+        '#vsb_content_2 a', '.box_content a',
+        '.cl_att a',  # 北邮 CMS 常见附件区域
+    ]:
+        for a in soup.select(selector):
+            href = a.get('href', '')
+            name = a.get_text(strip=True)
+            if href and name and href not in seen_urls:
+                seen_urls.add(href)
+                attachments.append({
+                    'name': name,
+                    'url': _make_absolute_url(href, base_url),
+                })
+
+    # 策略2: 查找指向文件的链接
+    for a in soup.find_all('a', href=True):
+        href = a.get('href', '').lower()
+        if any(href.endswith(ext) for ext in file_exts):
+            original_href = a.get('href', '')
+            name = a.get_text(strip=True) or original_href.split('/')[-1]
+            if original_href not in seen_urls:
+                seen_urls.add(original_href)
+                attachments.append({
+                    'name': name,
+                    'url': _make_absolute_url(original_href, base_url),
+                })
+
+    # 策略3: 查找包含 "_upload" 或 "attachment" 的 URL
+    for a in soup.find_all('a', href=True):
+        href = a.get('href', '')
+        if href in seen_urls:
+            continue
+        if any(kw in href.lower() for kw in ['_upload/', '/attachment/', '/upload/', '/file/']):
+            name = a.get_text(strip=True) or href.split('/')[-1]
+            if name and len(name) > 2:
+                seen_urls.add(href)
+                attachments.append({
+                    'name': name,
+                    'url': _make_absolute_url(href, base_url),
+                })
+
+    return attachments
+
+
+def _make_absolute_url(href: str, base_url: str) -> str:
+    """将相对 URL 转为绝对 URL"""
+    if href.startswith('http'):
+        return href
+    from urllib.parse import urljoin
+    # base_url 可能是 my.bupt.edu.cn 的页面
+    return urljoin(base_url, href)
